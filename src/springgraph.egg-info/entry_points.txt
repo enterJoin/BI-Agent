@@ -1,0 +1,2 @@
+[console_scripts]
+springgraph = springgraph.cli:app

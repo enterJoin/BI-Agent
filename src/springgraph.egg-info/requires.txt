@@ -1,0 +1,14 @@
+typer>=0.12
+pydantic-settings>=2.0
+psycopg[binary]>=3.2
+sqlalchemy>=2.0
+alembic>=1.13
+tree-sitter>=0.21
+tree-sitter-java>=0.21
+pyyaml>=6.0
+
+[dev]
+pytest>=8.0
+ruff>=0.5
+mypy>=1.10
+types-PyYAML>=6.0

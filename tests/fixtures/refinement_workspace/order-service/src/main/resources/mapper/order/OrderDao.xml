@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mapper namespace="com.example.order.dao.OrderDao">
+    <select id="listPaid" resultType="com.example.order.entity.OrderEntity">
+        SELECT id, order_sn FROM oms_order WHERE status = 1
+    </select>
+    <insert id="insertHistory">
+        INSERT INTO oms_order_operate_history (order_id, note) VALUES (#{id}, #{note})
+    </insert>
+</mapper>

@@ -1,0 +1,20 @@
+from pathlib import Path
+
+from springgraph.hashing import project_id, route_symbol_id, symbol_id
+
+
+def test_ids_are_stable() -> None:
+    root = Path(__file__).parent
+    assert project_id(root) == project_id(root)
+
+
+def test_different_symbols_get_different_ids() -> None:
+    first = symbol_id("project:a", "A.java", "class", "a.A", 1)
+    second = symbol_id("project:a", "A.java", "class", "a.B", 1)
+    assert first != second
+
+
+def test_route_id_is_sensitive() -> None:
+    first = route_symbol_id("project:a", "GET", "/a", "A.get")
+    second = route_symbol_id("project:a", "POST", "/a", "A.get")
+    assert first != second

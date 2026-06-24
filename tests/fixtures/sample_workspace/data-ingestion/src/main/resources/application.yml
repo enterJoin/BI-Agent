@@ -1,0 +1,14 @@
+spring:
+  application:
+    name: data-ingestion
+  datasource:
+    url: jdbc:mysql://10.0.0.1:3306/biz
+  data:
+    redis:
+      host: 10.0.0.2
+      port: 6379
+      database: 0
+  rabbitmq:
+    host: 10.0.0.3
+    port: 5672
+

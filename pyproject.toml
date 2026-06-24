@@ -1,0 +1,38 @@
+[project]
+name = "springgraph"
+version = "0.1.0"
+description = "Parse Java Spring Boot projects into a PostgreSQL-backed code graph."
+requires-python = ">=3.12"
+dependencies = [
+  "typer>=0.12",
+  "pydantic-settings>=2.0",
+  "psycopg[binary]>=3.2",
+  "sqlalchemy>=2.0",
+  "alembic>=1.13",
+  "tree-sitter>=0.21",
+  "tree-sitter-java>=0.21",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.5",
+  "mypy>=1.10",
+  "types-PyYAML>=6.0",
+]
+
+[project.scripts]
+springgraph = "springgraph.cli:app"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["springgraph"]

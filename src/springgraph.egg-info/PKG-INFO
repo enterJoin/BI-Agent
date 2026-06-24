@@ -1,0 +1,18 @@
+Metadata-Version: 2.4
+Name: springgraph
+Version: 0.1.0
+Summary: Parse Java Spring Boot projects into a PostgreSQL-backed code graph.
+Requires-Python: >=3.12
+Requires-Dist: typer>=0.12
+Requires-Dist: pydantic-settings>=2.0
+Requires-Dist: psycopg[binary]>=3.2
+Requires-Dist: sqlalchemy>=2.0
+Requires-Dist: alembic>=1.13
+Requires-Dist: tree-sitter>=0.21
+Requires-Dist: tree-sitter-java>=0.21
+Requires-Dist: pyyaml>=6.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: ruff>=0.5; extra == "dev"
+Requires-Dist: mypy>=1.10; extra == "dev"
+Requires-Dist: types-PyYAML>=6.0; extra == "dev"
