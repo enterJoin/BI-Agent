@@ -193,7 +193,7 @@ BEGIN
                 embedding_model TEXT NOT NULL,
                 embedding_dim INTEGER NOT NULL,
                 embedding vector(1024) NOT NULL,
-                content_hash TEXT NOT NULL,
+                content_hash TEXT NOT NULL,q
                 status TEXT NOT NULL DEFAULT 'active',
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 UNIQUE (
