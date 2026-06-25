@@ -120,14 +120,45 @@ def create_embedder(settings: Settings | None = None) -> Embedder:
 
 
 def _tokens(text: str) -> list[str]:
-    token = []
+    token: list[str] = []
+    cjk_token: list[str] = []
     tokens: list[str] = []
-    for char in text.lower():
-        if char.isalnum() or char in {"_", "-", ".", "/", ":"}:
-            token.append(char)
-        elif token:
+
+    def flush_word() -> None:
+        nonlocal token
+        if token:
             tokens.append("".join(token))
             token = []
-    if token:
-        tokens.append("".join(token))
+
+    def flush_cjk() -> None:
+        nonlocal cjk_token
+        if not cjk_token:
+            return
+        tokens.extend(cjk_token)
+        tokens.extend(
+            "".join(cjk_token[index : index + 2])
+            for index in range(len(cjk_token) - 1)
+        )
+        cjk_token = []
+
+    for char in text.lower():
+        if _is_cjk(char):
+            flush_word()
+            cjk_token.append(char)
+            continue
+        flush_cjk()
+        if char.isalnum() or char in {"_", "-", ".", "/", ":"}:
+            token.append(char)
+        else:
+            flush_word()
+    flush_word()
+    flush_cjk()
     return tokens
+
+
+def _is_cjk(char: str) -> bool:
+    return (
+        "\u3400" <= char <= "\u4dbf"
+        or "\u4e00" <= char <= "\u9fff"
+        or "\uf900" <= char <= "\ufaff"
+    )

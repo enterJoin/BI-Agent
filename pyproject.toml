@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Parse Java Spring Boot projects into a PostgreSQL-backed code graph."
 requires-python = ">=3.12"
 dependencies = [
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
   "typer>=0.12",
   "pydantic-settings>=2.0",
   "psycopg[binary]>=3.2",
@@ -24,6 +26,7 @@ dev = [
 
 [project.scripts]
 springgraph = "springgraph.cli:app"
+springgraph-api = "springgraph.api:run"
 
 [tool.ruff]
 line-length = 88

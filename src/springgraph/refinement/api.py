@@ -8,6 +8,10 @@ from springgraph.db import session_scope
 from springgraph.hashing import project_id
 from springgraph.refinement._embedder import create_embedder
 from springgraph.refinement._extractors import extract_file_facts
+from springgraph.refinement._library import (
+    extract_library_file_facts,
+    scan_library_files,
+)
 from springgraph.refinement._repository import RefinementRepository, merge_facts
 from springgraph.refinement._scanner import scan_refinement_files
 from springgraph.refinement._types import EdgeFact, RefinementFacts, RefinementResult
@@ -33,12 +37,14 @@ def _refine_with_session(root: Path, session: Session) -> RefinementResult:
     repository = RefinementRepository(session, project_id_value)
     repository.upsert_project(root)
     repository.clear_refinement_outputs()
-    files = scan_refinement_files(root)
+    source_files = scan_refinement_files(root)
+    library_files = scan_library_files(root)
+    files = source_files + library_files
     file_ids = repository.upsert_files(files)
 
     errors: list[str] = []
     per_file_facts: list[RefinementFacts] = []
-    for item in files:
+    for item in source_files:
         try:
             per_file_facts.append(
                 extract_file_facts(
@@ -48,6 +54,14 @@ def _refine_with_session(root: Path, session: Session) -> RefinementResult:
                     item.module_name,
                     item.service_name,
                 )
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{item.relative_path}: {exc}")
+
+    for item in library_files:
+        try:
+            per_file_facts.append(
+                extract_library_file_facts(item.path, item.relative_path)
             )
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{item.relative_path}: {exc}")
