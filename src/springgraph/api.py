@@ -1,12 +1,13 @@
 """FastAPI application for project refinement and vector retrieval."""
 
+import json
 import logging
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, Field, ValidationError
 
 from springgraph.config import get_settings
 from springgraph.logging_config import configure_logging
@@ -104,35 +105,43 @@ def create_app() -> FastAPI:
         return RefineProjectResponse(**asdict(result))
 
     @app.post("/api/vector-search", response_model=VectorSearchResponse)
-    def vector_search_endpoint(
-        request: VectorSearchRequest,
+    async def vector_search_endpoint(
+        request: Request,
     ) -> VectorSearchResponse:
-        if request.project_id is None and request.project_path is None:
+        raw_body = await request.body()
+        request_model = _parse_vector_search_request(raw_body)
+        if request_model.project_id is None and request_model.project_path is None:
             raise HTTPException(
                 status_code=400,
                 detail="project_id or project_path is required.",
             )
-        if request.project_id is not None and not request.project_id.strip():
+        if (
+            request_model.project_id is not None
+            and not request_model.project_id.strip()
+        ):
             raise HTTPException(
                 status_code=400,
                 detail="project_id must not be empty when provided.",
             )
-        if request.project_path is not None and not request.project_path.strip():
+        if (
+            request_model.project_path is not None
+            and not request_model.project_path.strip()
+        ):
             raise HTTPException(
                 status_code=400,
                 detail="project_path must not be empty when provided.",
             )
         try:
             result = search_project_vectors(
-                query=request.query,
-                project_id_value=request.project_id,
-                project_path=request.project_path,
-                limit=request.limit,
+                query=request_model.query,
+                project_id_value=request_model.project_id,
+                project_path=request_model.project_path,
+                limit=request_model.limit,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except VectorSearchError as exc:
-            logger.exception("Vector search failed for query: %s", request.query)
+            logger.exception("Vector search failed for query: %s", request_model.query)
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             logger.exception("Unexpected vector search failure.")
@@ -173,6 +182,30 @@ def _validated_project_path(raw_path: str) -> Path:
 
 def _match_response(match: VectorSearchMatch) -> VectorSearchMatchResponse:
     return VectorSearchMatchResponse(**asdict(match))
+
+
+def _parse_vector_search_request(raw_body: bytes) -> VectorSearchRequest:
+    if not raw_body:
+        raise HTTPException(
+            status_code=400,
+            detail="Request body must be a JSON object.",
+        )
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Request body must be a JSON object.",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Request body must be a JSON object.",
+        )
+    try:
+        return VectorSearchRequest.model_validate(payload)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
 
 app = create_app()

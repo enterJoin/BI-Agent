@@ -174,3 +174,29 @@ def test_vector_search_endpoint_accepts_project_id_real_shape(
     payload = response.json()
     assert payload["project_id"] == "project:f180a56f5c2d6c1c9d064558ba21cdfa"
     assert payload["matches"][0]["service_name"] == "guli-order-service"
+
+
+def test_vector_search_endpoint_accepts_json_string_body(
+    monkeypatch: object,
+) -> None:
+    expected = VectorSearchResult(
+        query="订单系统都用到了哪些表？",
+        project_id="project-1",
+        embedding_model="local-hash-embedding-v1",
+        embedding_dim=1024,
+        matches=[],
+    )
+    monkeypatch.setattr(api, "search_project_vectors", lambda **_: expected)
+
+    client = TestClient(api.app)
+    response = client.post(
+        "/api/vector-search",
+        content=(
+            '{"query":"订单系统都用到了哪些表？",'
+            '"project_id":"project-1","limit":10}'
+        ).encode(),
+        headers={"Content-Type": "text/plain; charset=utf-8"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["project_id"] == "project-1"
