@@ -14,17 +14,41 @@ from springgraph.rag.prompts.loader import load_prompt
 from springgraph.rag.schemas import RagEvidence, SourceSnippet
 
 
-def understand_question(question: str) -> QuestionUnderstanding:
-    """Ask the LLM to understand the question without fixed intent enums."""
+def plan_question_retrieval(
+    question: str,
+    available_tools: list[ToolConfig],
+    source_available: bool,
+    memory_observations: list[str],
+) -> tuple[QuestionUnderstanding, RetrievalPlan]:
+    """Ask the LLM to understand the question and create one retrieval plan."""
     prompt = "\n\n".join(
         [
-            load_prompt("question_understanding.md"),
-            f"User question:\n{question}",
+            load_prompt("plan_retrieval.md"),
+            f"Question:\n{question}",
+            f"Available tools:\n{_tools_json(available_tools)}",
+            f"Source reading allowed by request: {source_available}",
+            "Thread memory observations:\n"
+            f"{json.dumps(memory_observations, ensure_ascii=False)}",
         ]
     )
     payload = _invoke_json(prompt)
+    understanding_payload = payload.get("question_understanding")
+    if not isinstance(understanding_payload, dict):
+        understanding_payload = {}
+    plan_payload = payload.get("retrieval_plan")
+    if not isinstance(plan_payload, dict):
+        plan_payload = {}
+    understanding = _normalize_understanding(understanding_payload, question)
+    plan = _normalize_plan(plan_payload, understanding, question)
+    return understanding, plan
+
+
+def _normalize_understanding(
+    payload: dict[str, Any],
+    fallback_question: str,
+) -> QuestionUnderstanding:
     return {
-        "task_goal": _string(payload.get("task_goal"), question),
+        "task_goal": _string(payload.get("task_goal"), fallback_question),
         "sub_questions": _string_list(payload.get("sub_questions")),
         "business_terms": _string_list(payload.get("business_terms")),
         "technical_terms": _string_list(payload.get("technical_terms")),
@@ -33,34 +57,26 @@ def understand_question(question: str) -> QuestionUnderstanding:
     }
 
 
-def create_retrieval_plan(
-    question: str,
+def _normalize_plan(
+    payload: dict[str, Any],
     understanding: QuestionUnderstanding,
-    available_tools: list[ToolConfig],
-    source_available: bool,
+    fallback_question: str,
 ) -> RetrievalPlan:
-    """Ask the LLM to create a compact executable retrieval plan."""
-    prompt = "\n\n".join(
-        [
-            load_prompt("retrieval_plan.md"),
-            f"Question:\n{question}",
-            f"Question understanding:\n{json.dumps(understanding, ensure_ascii=False)}",
-            f"Available tools:\n{_tools_json(available_tools)}",
-            f"Source available: {source_available}",
-        ]
-    )
-    payload = _invoke_json(prompt)
-    steps = payload.get("steps")
-    if not isinstance(steps, list):
-        steps = []
+    raw_steps = payload.get("steps")
+    if not isinstance(raw_steps, list):
+        raw_steps = []
     task_goal = _string(
         payload.get("task_goal"),
-        understanding.get("task_goal", question),
+        understanding.get("task_goal", fallback_question),
     )
-    normalized_steps = [
-        _normalize_step(item, question) for item in steps if isinstance(item, dict)
-    ]
-    return {"task_goal": task_goal, "steps": normalized_steps}
+    return {
+        "task_goal": task_goal,
+        "steps": [
+            _normalize_step(item, fallback_question)
+            for item in raw_steps
+            if isinstance(item, dict)
+        ],
+    }
 
 
 def build_final_prompt(
@@ -140,6 +156,9 @@ def _evidence_summary(evidence: list[RagEvidence]) -> str:
             end_line = item.end_line or item.start_line
             location = f"{location}:{item.start_line}-{end_line}"
         details = item.content_excerpt or ""
+        route_details = _route_details(item)
+        if route_details:
+            details = f"{details}; {route_details}" if details else route_details
         if len(details) > 280:
             details = f"{details[:277]}..."
         lines.append(
@@ -157,6 +176,25 @@ def _snippet_summary(snippets: list[SourceSnippet]) -> str:
             f"{snippet.content[:500]}"
         )
     return "\n\n".join(lines) if lines else "No source snippets."
+
+
+def _route_details(item: RagEvidence) -> str:
+    raw_metadata = item.metadata.get("metadata")
+    if not isinstance(raw_metadata, dict):
+        return ""
+    http_method = raw_metadata.get("http_method")
+    route_path = raw_metadata.get("path")
+    handler = raw_metadata.get("handler")
+    if not any(isinstance(value, str) and value for value in (http_method, route_path)):
+        return ""
+    parts = []
+    if isinstance(http_method, str) and http_method:
+        parts.append(f"http_method={http_method}")
+    if isinstance(route_path, str) and route_path:
+        parts.append(f"path={route_path}")
+    if isinstance(handler, str) and handler:
+        parts.append(f"handler={handler}")
+    return "; ".join(parts)
 
 
 def _string(value: object, fallback: str) -> str:

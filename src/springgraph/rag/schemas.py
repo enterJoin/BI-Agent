@@ -67,3 +67,11 @@ class RagAnswer:
     mode: RagMode = "agentic"
     used_tools: list[str] = field(default_factory=list)
     observations: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RagStreamEvent:
+    """One event emitted by the streaming RAG API."""
+
+    event: str
+    data: dict[str, object]

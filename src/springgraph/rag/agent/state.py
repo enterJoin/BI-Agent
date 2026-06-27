@@ -38,6 +38,7 @@ class AgenticRagState(TypedDict, total=False):
     """LangGraph state for Agentic RAG."""
 
     thread_id: str
+    load_memory: bool
     user_id: str | None
     project_path: str
     project_id: str

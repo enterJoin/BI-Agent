@@ -3,7 +3,12 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from springgraph import api
-from springgraph.rag.schemas import RagAnswer, RagEvidence, SourceSnippet
+from springgraph.rag.schemas import (
+    RagAnswer,
+    RagEvidence,
+    RagStreamEvent,
+    SourceSnippet,
+)
 from springgraph.refinement._types import RefinementResult
 from springgraph.vector_search import VectorSearchMatch, VectorSearchResult
 
@@ -356,6 +361,50 @@ def test_rag_ask_endpoint_accepts_agentic_mode(
     assert payload["used_tools"] == ["artifact_search"]
     request = captured["request"]
     assert request.mode == "agentic"  # type: ignore[attr-defined]
+
+
+def test_rag_ask_stream_endpoint_returns_sse_events(
+    monkeypatch: object,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_stream_ask_project(request: object) -> list[RagStreamEvent]:
+        captured["request"] = request
+        return [
+            RagStreamEvent(
+                event="status",
+                data={"stage": "planning", "message": "Creating plan."},
+            ),
+            RagStreamEvent(
+                event="final",
+                data={"answer": {"answer": "ok", "used_tools": []}},
+            ),
+        ]
+
+    monkeypatch.setattr(api, "stream_ask_project", fake_stream_ask_project)
+
+    client = TestClient(api.app)
+    response = client.post(
+        "/api/rag/ask/stream",
+        json={
+            "question": "订单服务都用到了哪些表？",
+            "project_id": "project-1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert (
+        'event: status\ndata: {"stage": "planning", "message": "Creating plan."}'
+        in response.text
+    )
+    assert (
+        'event: final\ndata: {"answer": {"answer": "ok", "used_tools": []}}'
+        in response.text
+    )
+    assert "event: done\ndata: {}" in response.text
+    request = captured["request"]
+    assert request.project_id == "project-1"  # type: ignore[attr-defined]
 
 
 def test_rag_ask_endpoint_requires_project_identifier() -> None:

@@ -1,5 +1,6 @@
 """Load Agentic RAG configuration from YAML files."""
 
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,6 +17,7 @@ from springgraph.rag.config.models import (
 )
 
 
+@lru_cache(maxsize=1)
 def load_agentic_rag_config() -> AgenticRagConfig:
     """Load controlled agent settings."""
     data = _load_yaml(_config_path("agentic_rag.yml"))
@@ -31,6 +33,7 @@ def load_agentic_rag_config() -> AgenticRagConfig:
     )
 
 
+@lru_cache(maxsize=1)
 def load_tool_configs() -> list[ToolConfig]:
     """Load enabled tool registrations."""
     data = _load_yaml(_config_path("tools.yml"))

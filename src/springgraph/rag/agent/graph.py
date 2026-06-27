@@ -1,5 +1,6 @@
 """Build the controlled Agentic RAG LangGraph."""
 
+from functools import lru_cache
 from typing import Any, Protocol, cast
 
 from springgraph.rag.agent import nodes
@@ -13,6 +14,7 @@ class RunnableAgenticGraph(Protocol):
         """Run the graph."""
 
 
+@lru_cache(maxsize=1)
 def build_agentic_rag_graph() -> RunnableAgenticGraph:
     """Build the controlled Agentic RAG graph."""
     try:
@@ -24,9 +26,7 @@ def build_agentic_rag_graph() -> RunnableAgenticGraph:
     graph.add_node("load_runtime_config", nodes.load_runtime_config)
     graph.add_node("apply_request_defaults", nodes.apply_request_defaults)
     graph.add_node("load_thread_memory", nodes.load_thread_memory)
-    graph.add_node("check_project_source_path", nodes.check_project_source_path)
-    graph.add_node("understand_question", nodes.understand_question)
-    graph.add_node("create_retrieval_plan", nodes.create_retrieval_plan)
+    graph.add_node("plan_retrieval", nodes.plan_retrieval)
     graph.add_node("execute_retrieval_plan", nodes.execute_retrieval_plan)
     graph.add_node("generate_final_answer", nodes.generate_final_answer)
     graph.add_node("persist_turn_memory", nodes.persist_turn_memory)
@@ -34,10 +34,8 @@ def build_agentic_rag_graph() -> RunnableAgenticGraph:
     graph.add_edge(START, "load_runtime_config")
     graph.add_edge("load_runtime_config", "apply_request_defaults")
     graph.add_edge("apply_request_defaults", "load_thread_memory")
-    graph.add_edge("load_thread_memory", "check_project_source_path")
-    graph.add_edge("check_project_source_path", "understand_question")
-    graph.add_edge("understand_question", "create_retrieval_plan")
-    graph.add_edge("create_retrieval_plan", "execute_retrieval_plan")
+    graph.add_edge("load_thread_memory", "plan_retrieval")
+    graph.add_edge("plan_retrieval", "execute_retrieval_plan")
     graph.add_edge("execute_retrieval_plan", "generate_final_answer")
     graph.add_edge("generate_final_answer", "persist_turn_memory")
     graph.add_edge("persist_turn_memory", END)
@@ -53,9 +51,7 @@ class _FallbackAgenticGraph:
             nodes.load_runtime_config,
             nodes.apply_request_defaults,
             nodes.load_thread_memory,
-            nodes.check_project_source_path,
-            nodes.understand_question,
-            nodes.create_retrieval_plan,
+            nodes.plan_retrieval,
             nodes.execute_retrieval_plan,
         ):
             state = cast(Any, node)(state)

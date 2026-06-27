@@ -1,5 +1,6 @@
 """Application configuration."""
 
+from functools import lru_cache
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -26,6 +27,12 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_timeout_seconds: float = 60.0
     llm_temperature: float = 0.0
+    planner_llm_provider: str = ""
+    planner_llm_model: str = ""
+    planner_llm_base_url: str = ""
+    planner_llm_api_key: str = ""
+    planner_llm_timeout_seconds: float | None = None
+    planner_llm_temperature: float | None = None
 
     model_config = SettingsConfigDict(
         env_prefix="SPRINGGRAPH_",
@@ -37,6 +44,7 @@ class Settings(BaseSettings):
     )
 
 
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return application settings."""
     return Settings()

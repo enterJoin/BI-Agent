@@ -9,7 +9,6 @@ from springgraph.rag.config.loader import load_agentic_rag_config
 from springgraph.rag.llm import invoke_agent_model
 from springgraph.rag.memory.store import get_thread, update_thread
 from springgraph.rag.schemas import RagEvidence, SourceSnippet
-from springgraph.rag.source_reader import check_source_path
 from springgraph.rag.tools.registry import load_tool_registry
 from springgraph.rag.tools.schemas import ToolInput
 
@@ -40,12 +39,18 @@ def apply_request_defaults(state: AgenticRagState) -> AgenticRagState:
         "read_source",
         config.source_reading.enabled_by_default,
     )
+    state["source_available"] = bool(state["read_source"])
+    state["source_reading_skipped_reason"] = (
+        None if state["source_available"] else "read_source_disabled"
+    )
     return state
 
 
 def load_thread_memory(state: AgenticRagState) -> AgenticRagState:
     """Load minimal thread state."""
     if not state["runtime_config"].memory.short_term_enabled:
+        return state
+    if not state.get("load_memory", False):
         return state
     memory = get_thread(state["thread_id"])
     if not state.get("project_path") and memory.project_path is not None:
@@ -57,35 +62,18 @@ def load_thread_memory(state: AgenticRagState) -> AgenticRagState:
     return state
 
 
-def check_project_source_path(state: AgenticRagState) -> AgenticRagState:
-    """Apply the hard source path gate."""
-    allowed, reason = check_source_path(Path(state["project_path"]))
-    if not state.get("read_source", True):
-        allowed = False
-        reason = "read_source_disabled"
-    state["source_available"] = allowed
-    state["source_reading_skipped_reason"] = reason
-    return state
-
-
-def understand_question(state: AgenticRagState) -> AgenticRagState:
-    """Create open-ended question understanding with LLM."""
+def plan_retrieval(state: AgenticRagState) -> AgenticRagState:
+    """Create question understanding and one structured retrieval plan."""
     # TODO: Make question understanding context-aware by passing concise thread
     # memory, recent evidence, recent symbols, and project library hints.
-    state["question_understanding"] = planner.understand_question(
-        state["question"]
-    )
-    return state
-
-
-def create_retrieval_plan(state: AgenticRagState) -> AgenticRagState:
-    """Create one structured retrieval plan."""
-    state["retrieval_plan"] = planner.create_retrieval_plan(
+    understanding, retrieval_plan = planner.plan_question_retrieval(
         question=state["question"],
-        understanding=state["question_understanding"],
         available_tools=state["tool_configs"],
         source_available=state.get("source_available", False),
+        memory_observations=state.get("observations", []),
     )
+    state["question_understanding"] = understanding
+    state["retrieval_plan"] = retrieval_plan
     return state
 
 
@@ -130,6 +118,10 @@ def execute_retrieval_plan(state: AgenticRagState) -> AgenticRagState:
         state["source_snippets"] = _dedupe_source_snippets(
             [*state.get("source_snippets", []), *result.source_snippets]
         )
+        if tool_name == "source_read" and not result.source_snippets:
+            state["source_reading_skipped_reason"] = _source_skip_reason(
+                result.warnings
+            )
 
     if "source_read" not in state.get("used_tools", []):
         state["source_reading_skipped_reason"] = "not_requested_by_retrieval_plan"
@@ -184,6 +176,13 @@ def _tool_input(state: AgenticRagState, step: PlanStep) -> ToolInput:
 
 def _has_file_evidence(evidence: list[RagEvidence]) -> bool:
     return any(item.file_path for item in evidence)
+
+
+def _source_skip_reason(warnings: list[str]) -> str:
+    for warning in warnings:
+        if warning.startswith("source_read skipped:"):
+            return warning.removeprefix("source_read skipped:").strip()
+    return "source_read_returned_no_snippets"
 
 
 def _step_signature(step: PlanStep) -> str:

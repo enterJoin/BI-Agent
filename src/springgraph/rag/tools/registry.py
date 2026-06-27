@@ -1,6 +1,7 @@
 """Tool registry backed by external tool configuration."""
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 from springgraph.rag.config.loader import load_tool_configs
 from springgraph.rag.config.models import ToolConfig
@@ -34,6 +35,7 @@ class ToolRegistry:
         return [tool.config for tool in self.tools.values()]
 
 
+@lru_cache(maxsize=1)
 def load_tool_registry() -> ToolRegistry:
     """Build the registry from tools.yml."""
     tools: dict[str, RagTool] = {}

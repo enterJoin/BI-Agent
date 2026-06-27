@@ -165,6 +165,17 @@ def extract_java_file(
             edges.append(
                 EdgeData(source_id=file_id, target_id=class_symbol.id, kind="contains")
             )
+            _add_annotation_usages(
+                project_id_value,
+                relative_path,
+                class_symbol,
+                annotation_buffer,
+                i + 1,
+                symbols,
+                edges,
+                module_name,
+                service_name,
+            )
             _add_component_bean(
                 project_id_value,
                 relative_path,
@@ -208,6 +219,17 @@ def extract_java_file(
                         kind="contains",
                     )
                 )
+                _add_annotation_usages(
+                    project_id_value,
+                    relative_path,
+                    field_symbol,
+                    annotation_buffer,
+                    i + 1,
+                    symbols,
+                    edges,
+                    module_name,
+                    service_name,
+                )
                 field_types[field_match.group("name")] = _clean_type(
                     field_match.group("type")
                 )
@@ -249,11 +271,22 @@ def extract_java_file(
                         kind="contains",
                     )
                 )
+                _add_annotation_usages(
+                    project_id_value,
+                    relative_path,
+                    ctor_symbol,
+                    annotation_buffer,
+                    i + 1,
+                    symbols,
+                    edges,
+                    module_name,
+                    service_name,
+                )
                 _add_parameters_and_injections(
                     project_id_value,
                     relative_path,
                     ctor_symbol,
-                    ctor_match.group("params"),
+                    _method_params(line, ctor_match.group("name")),
                     i + 1,
                     symbols,
                     edges,
@@ -290,11 +323,22 @@ def extract_java_file(
                         kind="contains",
                     )
                 )
+                _add_annotation_usages(
+                    project_id_value,
+                    relative_path,
+                    method_symbol,
+                    annotation_buffer,
+                    i + 1,
+                    symbols,
+                    edges,
+                    module_name,
+                    service_name,
+                )
                 _add_parameters_and_injections(
                     project_id_value,
                     relative_path,
                     method_symbol,
-                    method_match.group("params"),
+                    _method_params(line, method_name),
                     i + 1,
                     symbols,
                     edges,
@@ -335,7 +379,7 @@ def extract_java_file(
                 i = max(i + 1, end_index + 1)
                 continue
 
-        if stripped and not stripped.startswith("@"):
+        if stripped and not stripped.startswith("@") and not _is_comment_line(stripped):
             annotation_buffer = []
         i += 1
 
@@ -356,7 +400,7 @@ class ParsedParameter:
 
     type_name: str
     name: str
-    annotations: list[str]
+    annotations: list[Annotation]
 
 
 def _parse_annotation(line: str) -> Annotation | None:
@@ -558,6 +602,74 @@ def _add_bean_method(
     )
 
 
+def _add_annotation_usages(
+    project_id_value: str,
+    relative_path: str,
+    target_symbol: SymbolData,
+    annotations: list[Annotation],
+    line_number: int,
+    symbols: list[SymbolData],
+    edges: list[EdgeData],
+    module_name: str | None,
+    service_name: str | None,
+) -> None:
+    for index, annotation in enumerate(annotations):
+        values = _parse_annotation_values(annotation.args)
+        primary_value = _annotation_primary_value(values)
+        qualified_name = _annotation_usage_qualified_name(
+            annotation.name,
+            primary_value,
+            target_symbol.qualified_name,
+            index,
+        )
+        annotation_symbol = SymbolData(
+            id=symbol_id(
+                project_id_value,
+                relative_path,
+                "annotation_usage",
+                qualified_name,
+                line_number,
+            ),
+            kind="annotation_usage",
+            name=_annotation_usage_name(annotation.name, primary_value),
+            qualified_name=qualified_name,
+            file_path=relative_path,
+            language="java",
+            start_line=line_number,
+            end_line=line_number,
+            start_column=0,
+            end_column=0,
+            signature=_annotation_signature(annotation),
+            metadata={
+                "annotation": annotation.name,
+                "raw_args": annotation.args,
+                "values": values,
+                "target_kind": target_symbol.kind,
+                "target_symbol_id": target_symbol.id,
+                "target_qualified_name": target_symbol.qualified_name,
+                "module_name": module_name,
+                "service_name": service_name,
+            },
+        )
+        symbols.append(annotation_symbol)
+        edges.append(
+            EdgeData(
+                source_id=target_symbol.id,
+                target_id=annotation_symbol.id,
+                kind="annotated_by",
+                line=line_number,
+            )
+        )
+        edges.append(
+            EdgeData(
+                source_id=annotation_symbol.id,
+                target_id=target_symbol.id,
+                kind="annotates",
+                line=line_number,
+            )
+        )
+
+
 def _add_parameters_and_injections(
     project_id_value: str,
     relative_path: str,
@@ -588,12 +700,23 @@ def _add_parameters_and_injections(
             start_column=0,
             end_column=0,
             signature=f"{param.type_name} {param.name}",
-            annotations=param.annotations,
+            annotations=[item.name for item in param.annotations],
             metadata={"type": param.type_name},
         )
         symbols.append(parameter)
         edges.append(
             EdgeData(source_id=owner_symbol.id, target_id=parameter.id, kind="contains")
+        )
+        _add_annotation_usages(
+            project_id_value,
+            relative_path,
+            parameter,
+            param.annotations,
+            line_number,
+            symbols,
+            edges,
+            _metadata_string(owner_symbol.metadata, "module_name"),
+            _metadata_string(owner_symbol.metadata, "service_name"),
         )
         if owner_symbol.kind == "constructor" and _is_project_type(param.type_name):
             unresolved.append(
@@ -680,8 +803,9 @@ def _add_route(
     )
     if route_annotation is None:
         return
-    http_method = http_method_for_annotation(route_annotation.name)
-    route_path = _join_paths(class_route, _route_path(route_annotation))
+    http_method = _http_method(route_annotation)
+    method_route = _route_path(route_annotation)
+    route_path = _join_paths(class_route, method_route)
     route_id = route_symbol_id(
         project_id_value, http_method, route_path, method_symbol.qualified_name
     )
@@ -700,6 +824,9 @@ def _add_route(
             "http_method": http_method,
             "path": route_path,
             "handler": method_symbol.qualified_name,
+            "class_mapping": class_route,
+            "method_mapping": method_route,
+            "source": "spring_mvc",
         },
     )
     symbols.append(route_symbol)
@@ -757,12 +884,12 @@ def _parse_parameters(params: str) -> list[ParsedParameter]:
     parsed: list[ParsedParameter] = []
     if not params.strip():
         return parsed
-    for raw in params.split(","):
+    for raw in _split_top_level(params, ","):
         text = raw.strip()
         if not text:
             continue
         annotations = [
-            match.group("name").rsplit(".", maxsplit=1)[-1]
+            Annotation(match.group("name"), match.group("args"))
             for match in ANNOTATION_RE.finditer(text)
         ]
         text = ANNOTATION_RE.sub("", text).strip()
@@ -779,6 +906,145 @@ def _parse_parameters(params: str) -> list[ParsedParameter]:
     return parsed
 
 
+def _parse_annotation_values(args: str) -> dict[str, object]:
+    values: dict[str, object] = {}
+    if not args.strip():
+        return values
+    unnamed_index = 0
+    for part in _split_top_level(args, ","):
+        text = part.strip()
+        if not text:
+            continue
+        assignment = _split_assignment(text)
+        if assignment is None:
+            key = "value" if unnamed_index == 0 else f"value_{unnamed_index}"
+            values[key] = _clean_annotation_value(text)
+            unnamed_index += 1
+            continue
+        key, raw_value = assignment
+        values[key.strip()] = _clean_annotation_value(raw_value.strip())
+    return values
+
+
+def _split_top_level(value: str, delimiter: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    escape = False
+    depth = 0
+    for char in value:
+        if quote:
+            current.append(char)
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            current.append(char)
+            continue
+        if char in "({[":
+            depth += 1
+        elif char in ")}]" and depth > 0:
+            depth -= 1
+        if char == delimiter and depth == 0:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    parts.append("".join(current))
+    return parts
+
+
+def _split_assignment(value: str) -> tuple[str, str] | None:
+    quote: str | None = None
+    escape = False
+    depth = 0
+    for index, char in enumerate(value):
+        if quote:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char in "({[":
+            depth += 1
+            continue
+        if char in ")}]" and depth > 0:
+            depth -= 1
+            continue
+        if char == "=" and depth == 0:
+            return value[:index], value[index + 1 :]
+    return None
+
+
+def _clean_annotation_value(value: str) -> object:
+    text = value.strip()
+    if text.startswith("{") and text.endswith("}"):
+        return [
+            _clean_annotation_value(item)
+            for item in _split_top_level(text[1:-1], ",")
+            if item.strip()
+        ]
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1].replace(f"\\{text[0]}", text[0]).replace("\\\\", "\\")
+    return text
+
+
+def _annotation_primary_value(values: dict[str, object]) -> str | None:
+    value = values.get("value")
+    if isinstance(value, str) and value:
+        return value
+    for item in values.values():
+        if isinstance(item, str) and item:
+            return item
+        if isinstance(item, list):
+            first = next((value for value in item if isinstance(value, str)), None)
+            if first:
+                return first
+    return None
+
+
+def _annotation_usage_name(annotation_name: str, primary_value: str | None) -> str:
+    if primary_value:
+        return f"@{annotation_name} {primary_value}"
+    return f"@{annotation_name}"
+
+
+def _annotation_usage_qualified_name(
+    annotation_name: str,
+    primary_value: str | None,
+    target_qualified_name: str,
+    index: int,
+) -> str:
+    parts = ["annotation_usage", annotation_name]
+    if primary_value:
+        parts.append(primary_value)
+    parts.extend([target_qualified_name, str(index)])
+    return ":".join(parts)
+
+
+def _annotation_signature(annotation: Annotation) -> str:
+    if annotation.args:
+        return f"@{annotation.name}({annotation.args})"
+    return f"@{annotation.name}"
+
+
+def _metadata_string(metadata: dict[str, object], key: str) -> str | None:
+    value = metadata.get(key)
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
 def _route_path_from_annotations(annotations: list[Annotation]) -> str:
     route = next((item for item in annotations if is_route_annotation(item.name)), None)
     return _route_path(route) if route else ""
@@ -789,6 +1055,15 @@ def _route_path(annotation: Annotation) -> str:
     if match:
         return match.group(1)
     return ""
+
+
+def _http_method(annotation: Annotation) -> str:
+    if annotation.name != "RequestMapping":
+        return http_method_for_annotation(annotation.name)
+    match = re.search(r"RequestMethod\.([A-Z]+)", annotation.args)
+    if match:
+        return match.group(1)
+    return http_method_for_annotation(annotation.name)
 
 
 def _join_paths(prefix: str, suffix: str) -> str:
@@ -813,6 +1088,39 @@ def _method_body(lines: list[str], start: int) -> tuple[list[tuple[int, str]], i
     return body, start
 
 
+def _method_params(line: str, method_name: str) -> str:
+    name_index = line.find(method_name)
+    if name_index < 0:
+        return ""
+    open_index = line.find("(", name_index + len(method_name))
+    if open_index < 0:
+        return ""
+    depth = 0
+    quote: str | None = None
+    escape = False
+    for index in range(open_index, len(line)):
+        char = line[index]
+        if quote:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char == "(":
+            depth += 1
+            continue
+        if char == ")":
+            depth -= 1
+            if depth == 0:
+                return line[open_index + 1 : index]
+    return ""
+
+
 def _block_end_line(lines: list[str], start: int) -> int:
     return _method_body(lines, start)[1] + 1
 
@@ -831,6 +1139,15 @@ def _is_project_type(type_name: str) -> bool:
 
 def _is_control_statement(value: str) -> bool:
     return value.strip() in {"if", "for", "while", "switch", "catch"}
+
+
+def _is_comment_line(stripped: str) -> bool:
+    return (
+        stripped.startswith("//")
+        or stripped.startswith("/*")
+        or stripped.startswith("*")
+        or stripped.startswith("*/")
+    )
 
 
 def _first_line_containing(lines: list[str], needle: str) -> int | None:

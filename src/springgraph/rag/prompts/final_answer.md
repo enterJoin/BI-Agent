@@ -7,3 +7,6 @@ Separate confirmed facts from inferences.
 If source reading was skipped, state the reason.
 Keep the answer concise. For table-list questions, group duplicate table evidence
 and list table names with their mapped artifact and source location.
+For HTTP route/interface answers, preserve the HTTP method exactly as shown in
+evidence. Do not infer GET/POST/PUT/DELETE from method names such as list,
+save, update, or delete. If evidence says ANY, answer ANY.

@@ -2,18 +2,20 @@
 
 import json
 import logging
+from collections.abc import Iterator
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from springgraph.config import get_settings
 from springgraph.logging_config import configure_logging
 from springgraph.rag.llm import LlmConfigurationError, LlmInvocationError
-from springgraph.rag.schemas import RagAnswer, RagRequest
-from springgraph.rag.service import RagRequestError, ask_project
+from springgraph.rag.schemas import RagAnswer, RagRequest, RagStreamEvent
+from springgraph.rag.service import RagRequestError, ask_project, stream_ask_project
 from springgraph.refinement import refine_project
 from springgraph.vector_search import (
     VectorSearchError,
@@ -220,19 +222,7 @@ def create_app() -> FastAPI:
     @app.post("/api/rag/ask", response_model=RagAskResponse)
     def rag_ask_endpoint(request: RagAskRequest) -> RagAskResponse:
         try:
-            result = ask_project(
-                request=RagRequest(
-                    question=request.question,
-                    project_id=request.project_id,
-                    project_path=request.project_path,
-                    thread_id=request.thread_id,
-                    user_id=request.user_id,
-                    top_k=request.top_k,
-                    graph_depth=request.graph_depth,
-                    read_source=request.read_source,
-                    mode=request.mode,
-                )
-            )
+            result = ask_project(request=_rag_request_from_api(request))
         except RagRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except LlmConfigurationError as exc:
@@ -245,6 +235,18 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
         return _rag_response(result)
+
+    @app.post("/api/rag/ask/stream")
+    def rag_ask_stream_endpoint(request: RagAskRequest) -> StreamingResponse:
+        rag_request = _rag_request_from_api(request)
+        return StreamingResponse(
+            _sse_rag_events(rag_request),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     return app
 
@@ -300,6 +302,62 @@ def _rag_response(answer: RagAnswer) -> RagAskResponse:
         used_tools=answer.used_tools,
         observations=answer.observations,
     )
+
+
+def _rag_request_from_api(request: RagAskRequest) -> RagRequest:
+    return RagRequest(
+        question=request.question,
+        project_id=request.project_id,
+        project_path=request.project_path,
+        thread_id=request.thread_id,
+        user_id=request.user_id,
+        top_k=request.top_k,
+        graph_depth=request.graph_depth,
+        read_source=request.read_source,
+        mode=request.mode,
+    )
+
+
+def _sse_rag_events(request: RagRequest) -> Iterator[str]:
+    try:
+        for event in stream_ask_project(request):
+            yield _format_sse(event)
+        yield _format_sse(RagStreamEvent(event="done", data={}))
+    except RagRequestError as exc:
+        yield _format_sse(
+            RagStreamEvent(
+                event="error",
+                data={"status_code": 400, "detail": str(exc)},
+            )
+        )
+    except LlmConfigurationError as exc:
+        yield _format_sse(
+            RagStreamEvent(
+                event="error",
+                data={"status_code": 500, "detail": str(exc)},
+            )
+        )
+    except LlmInvocationError as exc:
+        logger.exception("Streaming RAG LLM invocation failed.")
+        yield _format_sse(
+            RagStreamEvent(
+                event="error",
+                data={"status_code": 502, "detail": str(exc)},
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Streaming RAG ask failed.")
+        yield _format_sse(
+            RagStreamEvent(
+                event="error",
+                data={"status_code": 500, "detail": str(exc)},
+            )
+        )
+
+
+def _format_sse(event: RagStreamEvent) -> str:
+    payload = json.dumps(event.data, ensure_ascii=False)
+    return f"event: {event.event}\ndata: {payload}\n\n"
 
 
 def _parse_vector_search_request(raw_body: bytes) -> VectorSearchRequest:

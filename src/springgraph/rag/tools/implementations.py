@@ -5,14 +5,14 @@ import re
 from dataclasses import dataclass
 from typing import Any, cast
 
-from sqlalchemy import or_, select
+from sqlalchemy import Text, or_, select
 
 from springgraph.db import session_scope
 from springgraph.models import Edge, File, Symbol
 from springgraph.rag.config.models import ToolConfig
 from springgraph.rag.library_hints import load_query_hints
 from springgraph.rag.schemas import RagEvidence
-from springgraph.rag.source_reader import read_source_snippets
+from springgraph.rag.source_reader import check_source_path, read_source_snippets
 from springgraph.rag.tools.schemas import RagTool, ToolInput, ToolResult
 
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$.:/-]*")
@@ -33,6 +33,54 @@ _MODULE_GENERIC_TERMS = {
     "table",
     "xml",
 }
+_GENERIC_QUERY_EXPANSIONS = {
+    "\u63a5\u53e3": [
+        "api",
+        "endpoint",
+        "route",
+        "controller",
+        "mapping",
+        "RestController",
+        "RequestMapping",
+        "GetMapping",
+        "PostMapping",
+        "PutMapping",
+        "DeleteMapping",
+    ],
+    "\u8def\u7531": ["route", "endpoint", "mapping", "controller"],
+    "http": ["api", "endpoint", "route", "controller", "mapping"],
+    "api": ["endpoint", "route", "controller", "mapping"],
+    "endpoint": ["api", "route", "controller", "mapping"],
+}
+_TABLE_QUERY_TERMS = {
+    "\u8868",
+    "\u5165\u5e93",
+    "\u6570\u636e\u5e93",
+    "\u5b58\u5165",
+    "\u5b58\u5230",
+    "\u5b58\u50a8",
+    "\u4fdd\u5b58",
+    "\u5199\u5165",
+    "\u843d\u5e93",
+    "\u6301\u4e45\u5316",
+    "\u63d2\u5165",
+    "\u65b0\u589e",
+}
+_TABLE_QUERY_TERMS_LOWER = {
+    "table",
+    "mapper",
+    "entity",
+    "sql",
+    "persist",
+    "persistence",
+    "save",
+    "insert",
+    "write",
+    "store",
+    "storage",
+    "repository",
+    "dao",
+}
 
 
 @dataclass(frozen=True)
@@ -48,7 +96,8 @@ class ArtifactSearchTool:
         module = _optional_string(filters.get("module"))
         path_contains = _optional_string(filters.get("path_contains"))
         terms = _query_terms(query)
-        limit = _limit(tool_input.top_k, multiplier=4)
+        is_http_query = _looks_like_http_api_query(query)
+        limit = _limit(tool_input.top_k, multiplier=20 if is_http_query else 4)
 
         with session_scope() as session:
             resolved_module = _resolve_module(
@@ -84,6 +133,8 @@ class ArtifactSearchTool:
                         [
                             Symbol.name.ilike(pattern),
                             Symbol.qualified_name.ilike(pattern),
+                            Symbol.annotations.cast(Text).ilike(pattern),
+                            Symbol.meta.cast(Text).ilike(pattern),
                             File.path.ilike(pattern),
                         ]
                     )
@@ -94,6 +145,11 @@ class ArtifactSearchTool:
                     limit
                 )
             ).all()
+            if is_http_query:
+                rows = sorted(
+                    rows,
+                    key=lambda row: _http_artifact_rank(row[0], row[1]),
+                )
 
         evidence = [
             _symbol_evidence(symbol, file_row, "artifact")
@@ -192,6 +248,13 @@ class SourceReadTool:
                 tool_name=self.config.name,
                 summary="Source reading skipped because source is unavailable.",
                 warnings=["source_read skipped: source_available=false"],
+            )
+        allowed, reason = check_source_path(tool_input.project_path)
+        if not allowed:
+            return ToolResult(
+                tool_name=self.config.name,
+                summary=f"Source reading skipped: {reason}.",
+                warnings=[f"source_read skipped: {reason}"],
             )
         snippets, warnings = read_source_snippets(
             tool_input.project_path,
@@ -382,6 +445,10 @@ def _expand_query_with_library(query: str, tool_input: ToolInput) -> str:
     for keyword, values in hints.items():
         if keyword in query:
             terms.extend(values)
+    lowered = query.lower()
+    for keyword, values in _GENERIC_QUERY_EXPANSIONS.items():
+        if keyword in query or keyword in lowered:
+            terms.extend(values)
     return " ".join(_dedupe_terms(terms))
 
 
@@ -526,12 +593,45 @@ def _prioritized_terms(terms: list[str]) -> list[str]:
 
 def _looks_like_table_question(query: str) -> bool:
     lowered = query.lower()
+    return any(term in query for term in _TABLE_QUERY_TERMS) or any(
+        term in lowered for term in _TABLE_QUERY_TERMS_LOWER
+    )
+
+
+def _looks_like_http_api_query(query: str) -> bool:
+    lowered = query.lower()
     return any(
         term in query
-        for term in ("\u8868", "\u5165\u5e93", "\u6570\u636e\u5e93")
+        for term in ("\u63a5\u53e3", "\u8def\u7531")
     ) or any(
-        term in lowered for term in ("table", "mapper", "entity", "sql")
+        term in lowered
+        for term in (
+            "http",
+            "api",
+            "endpoint",
+            "route",
+            "controller",
+            "mapping",
+        )
     )
+
+
+def _http_artifact_rank(symbol: Symbol, file_row: File) -> tuple[int, str, int, str]:
+    path = file_row.path.lower()
+    qualified = symbol.qualified_name.lower()
+    if symbol.kind == "route":
+        primary = 0
+    elif "/controller/" in path or qualified.endswith("controller"):
+        primary = 1
+    elif "/web/" in path:
+        primary = 2
+    elif "/feign/" in path or "feign" in qualified:
+        primary = 3
+    elif "application" in path or "/config/" in path:
+        primary = 8
+    else:
+        primary = 5
+    return (primary, path, symbol.start_line, symbol.qualified_name)
 
 
 def _limit(top_k: int, multiplier: int) -> int:
