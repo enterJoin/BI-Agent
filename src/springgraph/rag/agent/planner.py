@@ -8,7 +8,9 @@ from springgraph.rag.agent.state import (
     QuestionUnderstanding,
     RetrievalPlan,
 )
-from springgraph.rag.config.models import ToolConfig
+from springgraph.rag.config.loader import load_intent_configs
+from springgraph.rag.config.models import IntentConfig, ToolConfig
+from springgraph.rag.intent import infer_query_intent, intent_default_filters
 from springgraph.rag.llm import invoke_agent_model
 from springgraph.rag.prompts.loader import load_prompt
 from springgraph.rag.schemas import RagEvidence, SourceSnippet
@@ -40,6 +42,7 @@ def plan_question_retrieval(
         plan_payload = {}
     understanding = _normalize_understanding(understanding_payload, question)
     plan = _normalize_plan(plan_payload, understanding, question)
+    plan = apply_intent_defaults(plan, understanding, load_intent_configs())
     return understanding, plan
 
 
@@ -49,6 +52,7 @@ def _normalize_understanding(
 ) -> QuestionUnderstanding:
     return {
         "task_goal": _string(payload.get("task_goal"), fallback_question),
+        "intent": _string(payload.get("intent"), "unknown"),
         "sub_questions": _string_list(payload.get("sub_questions")),
         "business_terms": _string_list(payload.get("business_terms")),
         "technical_terms": _string_list(payload.get("technical_terms")),
@@ -79,18 +83,66 @@ def _normalize_plan(
     }
 
 
+def apply_intent_defaults(
+    plan: RetrievalPlan,
+    understanding: QuestionUnderstanding,
+    intent_configs: dict[str, IntentConfig],
+) -> RetrievalPlan:
+    """Apply configured intent defaults to planned tool filters."""
+    steps = plan.get("steps", [])
+    updated_steps = [
+        _apply_step_intent_defaults(step, understanding, intent_configs)
+        for step in steps
+    ]
+    return {**plan, "steps": updated_steps}
+
+
+def _apply_step_intent_defaults(
+    step: PlanStep,
+    understanding: QuestionUnderstanding,
+    intent_configs: dict[str, IntentConfig],
+) -> PlanStep:
+    filters = dict(step.get("filters", {}))
+    tool_name = step.get("tool_name", "")
+    explicit_intent = _string_or_none(filters.get("intent")) or _known_intent(
+        understanding.get("intent"),
+        intent_configs,
+    )
+    group_by = _string_or_none(filters.get("group_by"))
+    intent = infer_query_intent(
+        query=step.get("query", ""),
+        explicit_intent=explicit_intent,
+        group_by=group_by,
+        intent_configs=intent_configs,
+    )
+    if intent is None:
+        return {**step, "filters": filters}
+    config = intent_configs.get(intent)
+    if config is None or config.default_tool != tool_name:
+        return {**step, "filters": filters}
+    merged_filters = {
+        **intent_default_filters(intent, intent_configs),
+        **filters,
+        "intent": intent,
+    }
+    return {**step, "filters": merged_filters}
+
+
 def build_final_prompt(
     question: str,
     understanding: QuestionUnderstanding,
     evidence: list[RagEvidence],
     source_snippets: list[SourceSnippet],
     observations: list[str],
+    conversation_history: list[dict[str, str]],
     source_reading_skipped_reason: str | None,
 ) -> str:
     """Build the final answer prompt."""
     return "\n\n".join(
         [
             load_prompt("final_answer.md"),
+            "Conversation history:\n"
+            f"{_conversation_history_summary(conversation_history)}",
             f"Question:\n{question}",
             f"Question understanding:\n{json.dumps(understanding, ensure_ascii=False)}",
             f"Tool observations:\n{json.dumps(observations, ensure_ascii=False)}",
@@ -178,6 +230,17 @@ def _snippet_summary(snippets: list[SourceSnippet]) -> str:
     return "\n\n".join(lines) if lines else "No source snippets."
 
 
+def _conversation_history_summary(messages: list[dict[str, str]]) -> str:
+    lines: list[str] = []
+    for message in messages:
+        role = message.get("role", "").strip()
+        content = message.get("content", "").strip()
+        if not role or not content:
+            continue
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines) if lines else "No prior conversation."
+
+
 def _route_details(item: RagEvidence) -> str:
     raw_metadata = item.metadata.get("metadata")
     if not isinstance(raw_metadata, dict):
@@ -201,6 +264,24 @@ def _string(value: object, fallback: str) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return fallback
+
+
+def _string_or_none(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _known_intent(
+    value: object,
+    intent_configs: dict[str, IntentConfig],
+) -> str | None:
+    if not isinstance(value, str):
+        return None
+    intent = value.strip().lower()
+    if intent not in intent_configs:
+        return None
+    return intent
 
 
 def _string_list(value: object) -> list[str]:

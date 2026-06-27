@@ -9,7 +9,9 @@ from sqlalchemy import Text, or_, select
 
 from springgraph.db import session_scope
 from springgraph.models import Edge, File, Symbol
+from springgraph.rag.config.loader import load_intent_configs
 from springgraph.rag.config.models import ToolConfig
+from springgraph.rag.intent import TABLE_RETRIEVAL_INTENTS, infer_query_intent
 from springgraph.rag.library_hints import load_query_hints
 from springgraph.rag.schemas import RagEvidence
 from springgraph.rag.source_reader import check_source_path, read_source_snippets
@@ -51,35 +53,6 @@ _GENERIC_QUERY_EXPANSIONS = {
     "http": ["api", "endpoint", "route", "controller", "mapping"],
     "api": ["endpoint", "route", "controller", "mapping"],
     "endpoint": ["api", "route", "controller", "mapping"],
-}
-_TABLE_QUERY_TERMS = {
-    "\u8868",
-    "\u5165\u5e93",
-    "\u6570\u636e\u5e93",
-    "\u5b58\u5165",
-    "\u5b58\u5230",
-    "\u5b58\u50a8",
-    "\u4fdd\u5b58",
-    "\u5199\u5165",
-    "\u843d\u5e93",
-    "\u6301\u4e45\u5316",
-    "\u63d2\u5165",
-    "\u65b0\u589e",
-}
-_TABLE_QUERY_TERMS_LOWER = {
-    "table",
-    "mapper",
-    "entity",
-    "sql",
-    "persist",
-    "persistence",
-    "save",
-    "insert",
-    "write",
-    "store",
-    "storage",
-    "repository",
-    "dao",
 }
 
 
@@ -224,7 +197,14 @@ class AggregateQueryTool:
 
     def invoke(self, tool_input: ToolInput) -> ToolResult:
         group_by = _optional_string(tool_input.filters.get("group_by"))
-        if group_by == "table_name" or _looks_like_table_question(tool_input.query):
+        explicit_intent = _optional_string(tool_input.filters.get("intent"))
+        intent = infer_query_intent(
+            query=tool_input.query,
+            explicit_intent=explicit_intent,
+            group_by=group_by,
+            intent_configs=load_intent_configs(),
+        )
+        if intent in TABLE_RETRIEVAL_INTENTS:
             return _aggregate_tables(self.config, tool_input)
         return ToolResult(
             tool_name=self.config.name,
@@ -592,10 +572,13 @@ def _prioritized_terms(terms: list[str]) -> list[str]:
 
 
 def _looks_like_table_question(query: str) -> bool:
-    lowered = query.lower()
-    return any(term in query for term in _TABLE_QUERY_TERMS) or any(
-        term in lowered for term in _TABLE_QUERY_TERMS_LOWER
+    intent = infer_query_intent(
+        query=query,
+        explicit_intent=None,
+        group_by=None,
+        intent_configs=load_intent_configs(),
     )
+    return intent in TABLE_RETRIEVAL_INTENTS
 
 
 def _looks_like_http_api_query(query: str) -> bool:

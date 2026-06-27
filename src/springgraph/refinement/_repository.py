@@ -1,7 +1,9 @@
 """Persistence helpers for semantic refinement."""
 
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any, cast
 
 from sqlalchemy import Table, delete, select
@@ -29,6 +31,8 @@ from springgraph.refinement._types import (
 
 PARSER_VERSION = "semantic-refinement-v1"
 TEMPLATE_VERSION = "semantic-refinement-v1"
+
+logger = logging.getLogger(__name__)
 
 
 class RefinementRepository:
@@ -217,6 +221,15 @@ class RefinementRepository:
         embedder: Embedder,
     ) -> tuple[int, int]:
         """Upsert code chunks and deterministic embeddings."""
+        started_at = perf_counter()
+        logger.info(
+            "Chunk and embedding upsert started: project_id=%s, chunks=%s, "
+            "embedding_model=%s, embedding_dim=%s",
+            self.project_id,
+            len(chunks),
+            embedder.model_name,
+            embedder.dimensions,
+        )
         chunk_count = 0
         embedding_count = 0
         for chunk in chunks:
@@ -286,6 +299,14 @@ class RefinementRepository:
             )
             self.session.execute(embedding_stmt)
             embedding_count += 1
+        logger.info(
+            "Chunk and embedding upsert completed: project_id=%s, "
+            "chunks_upserted=%s, embeddings_upserted=%s, elapsed_seconds=%.3f",
+            self.project_id,
+            chunk_count,
+            embedding_count,
+            perf_counter() - started_at,
+        )
         return chunk_count, embedding_count
 
     def finish_embedding_job(

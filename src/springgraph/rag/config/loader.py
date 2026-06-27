@@ -9,6 +9,7 @@ import yaml
 from springgraph.rag.config.models import (
     AgenticRagConfig,
     ContextConfig,
+    IntentConfig,
     MemoryConfig,
     RetrievalConfig,
     SafetyConfig,
@@ -56,6 +57,31 @@ def load_tool_configs() -> list[ToolConfig]:
     return [tool for tool in tools if tool.enabled]
 
 
+@lru_cache(maxsize=1)
+def load_intent_configs() -> dict[str, IntentConfig]:
+    """Load query intent routing metadata."""
+    data = _load_yaml(_config_path("intents.yml"))
+    raw_intents = data.get("intents")
+    if not isinstance(raw_intents, dict):
+        return {}
+    intents: dict[str, IntentConfig] = {}
+    for raw_name, raw_item in raw_intents.items():
+        if not isinstance(raw_item, dict):
+            continue
+        name = str(raw_name).strip()
+        if not name:
+            continue
+        intents[name] = IntentConfig(
+            name=name,
+            description=str(raw_item.get("description", "")),
+            default_tool=str(raw_item.get("default_tool", "")),
+            default_filters=_mapping(raw_item.get("default_filters")),
+            chinese_terms=_string_list(raw_item.get("chinese_terms")),
+            english_terms=_string_list(raw_item.get("english_terms")),
+        )
+    return intents
+
+
 def _config_path(name: str) -> Path:
     return Path(__file__).resolve().parents[4] / "config" / "rag" / name
 
@@ -72,3 +98,9 @@ def _mapping(value: object) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     return cast(dict[str, Any], value)
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]

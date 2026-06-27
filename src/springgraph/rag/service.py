@@ -12,6 +12,7 @@ from springgraph.models import Project
 from springgraph.rag.agent import nodes
 from springgraph.rag.agent.graph import build_agentic_rag_graph
 from springgraph.rag.agent.state import AgenticRagState
+from springgraph.rag.memory.store import ensure_chat_thread
 from springgraph.rag.schemas import (
     RagAnswer,
     RagEvidence,
@@ -40,6 +41,12 @@ def ask_project(request: RagRequest) -> RagAnswer:
     mode = request.mode.strip().lower()
     if mode != "agentic":
         raise RagRequestError(f"Unsupported RAG mode: {request.mode}")
+    _ensure_chat_thread_if_project_exists(
+        project_id=project_id_value,
+        user_id=request.user_id,
+        thread_id=thread_id,
+        title=request.title or question,
+    )
     return _ask_project_agentic(
         request=request,
         question=question,
@@ -87,6 +94,12 @@ def stream_ask_project(request: RagRequest) -> Iterator[RagStreamEvent]:
     mode = request.mode.strip().lower()
     if mode != "agentic":
         raise RagRequestError(f"Unsupported RAG mode: {request.mode}")
+    _ensure_chat_thread_if_project_exists(
+        project_id=project_id_value,
+        user_id=request.user_id,
+        thread_id=thread_id,
+        title=request.title or question,
+    )
 
     state = _initial_state(
         request=request,
@@ -170,6 +183,7 @@ def _initial_state(
         "thread_id": thread_id,
         "load_memory": request.thread_id is not None,
         "user_id": request.user_id,
+        "title": request.title,
         "project_path": str(project_path),
         "project_id": project_id_value,
         "question": question,
@@ -182,6 +196,24 @@ def _initial_state(
 
 def _event(event: str, **data: object) -> RagStreamEvent:
     return RagStreamEvent(event=event, data=data)
+
+
+def _ensure_chat_thread_if_project_exists(
+    project_id: str,
+    user_id: str | None,
+    thread_id: str,
+    title: str,
+) -> None:
+    try:
+        ensure_chat_thread(
+            project_id=project_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            title=title,
+        )
+    except ValueError as exc:
+        if "project_id was not found" not in str(exc):
+            raise
 
 
 def _answer_from_state(

@@ -37,6 +37,8 @@ class MemoryConfig:
 
     short_term_enabled: bool
     long_term_enabled: bool
+    max_history_messages: int = 6
+    max_history_chars: int = 4000
 
 
 @dataclass(frozen=True)
@@ -68,3 +70,15 @@ class ToolConfig:
     capabilities: list[str] = field(default_factory=list)
     requires: list[str] = field(default_factory=list)
     enabled: bool = True
+
+
+@dataclass(frozen=True)
+class IntentConfig:
+    """Query intent routing metadata."""
+
+    name: str
+    description: str
+    default_tool: str
+    default_filters: dict[str, object] = field(default_factory=dict)
+    chinese_terms: list[str] = field(default_factory=list)
+    english_terms: list[str] = field(default_factory=list)

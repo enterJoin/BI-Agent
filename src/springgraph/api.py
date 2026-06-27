@@ -5,15 +5,30 @@ import logging
 from collections.abc import Iterator
 from dataclasses import asdict
 from pathlib import Path
+from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import AliasChoices, BaseModel, Field, ValidationError
+from sqlalchemy import desc, select
 
 from springgraph.config import get_settings
+from springgraph.db import session_scope
 from springgraph.logging_config import configure_logging
+from springgraph.models import Project
 from springgraph.rag.llm import LlmConfigurationError, LlmInvocationError
+from springgraph.rag.memory.store import (
+    RagMessageRecord,
+    RagThreadRecord,
+    create_chat_thread,
+    delete_chat_thread,
+    ensure_chat_thread,
+    list_chat_messages,
+    list_chat_threads,
+    update_chat_thread_title,
+)
 from springgraph.rag.schemas import RagAnswer, RagRequest, RagStreamEvent
 from springgraph.rag.service import RagRequestError, ask_project, stream_ask_project
 from springgraph.refinement import refine_project
@@ -46,12 +61,37 @@ class RefineProjectResponse(BaseModel):
     errors: list[str]
 
 
+class ProjectResponse(BaseModel):
+    """Indexed project returned by project APIs."""
+
+    id: str
+    root_path: str
+    name: str
+    created_at: str
+    updated_at: str
+
+
 class VectorSearchRequest(BaseModel):
     """Request body for vector-only semantic retrieval."""
 
     query: str = Field(..., min_length=1)
-    project_id: str | None = None
-    project_path: str | None = None
+    project_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("project_id", "projectId"),
+    )
+    project_path: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("project_path", "projectPath"),
+    )
+    user_id: str | None = Field(
+        default="1",
+        validation_alias=AliasChoices("user_id", "userId"),
+    )
+    thread_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("thread_id", "threadId"),
+    )
+    title: str | None = None
     limit: int = Field(default=10, ge=1, le=100)
 
 
@@ -80,6 +120,9 @@ class VectorSearchResponse(BaseModel):
 
     query: str
     project_id: str
+    user_id: str | None = None
+    thread_id: str | None = None
+    title: str | None = None
     embedding_model: str
     embedding_dim: int
     matches: list[VectorSearchMatchResponse]
@@ -89,13 +132,39 @@ class RagAskRequest(BaseModel):
     """Request body for RAG question answering."""
 
     question: str = Field(..., min_length=1)
-    project_id: str | None = None
-    project_path: str | None = None
-    thread_id: str | None = None
-    user_id: str | None = None
-    top_k: int = Field(default=8, ge=1, le=50)
-    graph_depth: int = Field(default=2, ge=0, le=3)
-    read_source: bool = True
+    project_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("project_id", "projectId"),
+    )
+    project_path: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("project_path", "projectPath"),
+    )
+    thread_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("thread_id", "threadId"),
+    )
+    user_id: str | None = Field(
+        default="1",
+        validation_alias=AliasChoices("user_id", "userId"),
+    )
+    title: str | None = None
+    top_k: int = Field(
+        default=8,
+        ge=1,
+        le=50,
+        validation_alias=AliasChoices("top_k", "topK"),
+    )
+    graph_depth: int = Field(
+        default=2,
+        ge=0,
+        le=3,
+        validation_alias=AliasChoices("graph_depth", "graphDepth"),
+    )
+    read_source: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("read_source", "readSource"),
+    )
     mode: str = "agentic"
 
 
@@ -144,6 +213,66 @@ class RagAskResponse(BaseModel):
     observations: list[str] = Field(default_factory=list)
 
 
+class RagThreadCreateRequest(BaseModel):
+    """Request body for creating a RAG chat thread."""
+
+    project_id: str = Field(
+        ...,
+        min_length=1,
+        validation_alias=AliasChoices("project_id", "projectId"),
+    )
+    user_id: str | None = Field(
+        default="1",
+        validation_alias=AliasChoices("user_id", "userId"),
+    )
+    thread_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("thread_id", "threadId"),
+    )
+    title: str | None = None
+    first_question: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("first_question", "firstQuestion"),
+    )
+
+
+class RagThreadUpdateTitleRequest(BaseModel):
+    """Request body for updating a RAG chat thread title."""
+
+    project_id: str = Field(
+        ...,
+        min_length=1,
+        validation_alias=AliasChoices("project_id", "projectId"),
+    )
+    user_id: str | None = Field(
+        default="1",
+        validation_alias=AliasChoices("user_id", "userId"),
+    )
+    title: str = Field(..., min_length=1)
+
+
+class RagThreadResponse(BaseModel):
+    """Persisted RAG chat thread returned by APIs."""
+
+    id: int
+    project_id: str
+    user_id: str
+    thread_id: str
+    title: str
+    created_at: str
+    updated_at: str
+
+
+class RagMessageResponse(BaseModel):
+    """Persisted RAG chat message returned by APIs."""
+
+    id: int
+    thread_id: str
+    role: str
+    content: str
+    created_at: str
+
+
 def create_app() -> FastAPI:
     """Create the FastAPI application."""
     configure_logging(get_settings().log_level)
@@ -157,17 +286,55 @@ def create_app() -> FastAPI:
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/api/projects", response_model=list[ProjectResponse])
+    def list_projects_endpoint() -> list[ProjectResponse]:
+        try:
+            projects = _list_project_records()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Project list API failed.")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return [_project_response(project) for project in projects]
+
+    @app.get("/api/projects/{project_id}", response_model=ProjectResponse)
+    def get_project_endpoint(project_id: str) -> ProjectResponse:
+        try:
+            project = _get_project_record(project_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Project detail API failed: project_id=%s", project_id)
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if project is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"project_id was not found: {project_id}",
+            )
+        return _project_response(project)
+
     @app.post("/api/refine", response_model=RefineProjectResponse)
     def refine_endpoint(request: RefineProjectRequest) -> RefineProjectResponse:
         project_path = _validated_project_path(request.project_path)
+        started_at = perf_counter()
+        logger.info("Refine API request started: project_path=%s", project_path)
         try:
             result = refine_project(project_path)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Project refinement failed for path: %s", project_path)
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.info(
+            "Refine API request completed: project_id=%s, files_seen=%s, "
+            "symbols_upserted=%s, edges_upserted=%s, chunks_upserted=%s, "
+            "embeddings_upserted=%s, elapsed_seconds=%.3f",
+            result.project_id,
+            result.files_seen,
+            result.symbols_upserted,
+            result.edges_upserted,
+            result.chunks_upserted,
+            result.embeddings_upserted,
+            perf_counter() - started_at,
+        )
 
         return RefineProjectResponse(**asdict(result))
 
+    @app.post("/api/vector_search", response_model=VectorSearchResponse)
     @app.post("/api/vector-search", response_model=VectorSearchResponse)
     async def vector_search_endpoint(
         request: Request,
@@ -211,9 +378,24 @@ def create_app() -> FastAPI:
             logger.exception("Unexpected vector search failure.")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+        thread_id = _resolved_thread_id(request_model.thread_id)
+        title = request_model.title or request_model.query
+        try:
+            ensure_chat_thread(
+                project_id=result.project_id,
+                user_id=request_model.user_id,
+                thread_id=thread_id,
+                title=title,
+            )
+        except ValueError as exc:
+            raise _chat_http_exception(exc) from exc
+
         return VectorSearchResponse(
             query=result.query,
             project_id=result.project_id,
+            user_id=request_model.user_id,
+            thread_id=thread_id,
+            title=title,
             embedding_model=result.embedding_model,
             embedding_dim=result.embedding_dim,
             matches=[_match_response(match) for match in result.matches],
@@ -248,6 +430,90 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.post("/api/rag/threads", response_model=RagThreadResponse)
+    def create_rag_thread_endpoint(
+        request: RagThreadCreateRequest,
+    ) -> RagThreadResponse:
+        try:
+            title = request.title or request.first_question
+            thread = create_chat_thread(
+                project_id=request.project_id,
+                user_id=request.user_id,
+                title=title,
+                thread_id=request.thread_id,
+            )
+        except ValueError as exc:
+            raise _chat_http_exception(exc) from exc
+        return _thread_response(thread)
+
+    @app.get("/api/rag/threads", response_model=list[RagThreadResponse])
+    def list_rag_threads_endpoint(
+        request: Request,
+    ) -> list[RagThreadResponse]:
+        project_id = _required_query_param(request, "projectId", "project_id")
+        user_id = _optional_query_param(request, "userId", "user_id")
+        try:
+            threads = list_chat_threads(project_id=project_id, user_id=user_id)
+        except ValueError as exc:
+            raise _chat_http_exception(exc) from exc
+        return [_thread_response(thread) for thread in threads]
+
+    @app.get(
+        "/api/rag/threads/{thread_id}/messages",
+        response_model=list[RagMessageResponse],
+    )
+    def list_rag_messages_endpoint(
+        thread_id: str,
+        request: Request,
+    ) -> list[RagMessageResponse]:
+        project_id = _required_query_param(request, "projectId", "project_id")
+        user_id = _optional_query_param(request, "userId", "user_id")
+        try:
+            messages = list_chat_messages(
+                project_id=project_id,
+                user_id=user_id,
+                thread_id=thread_id,
+            )
+        except ValueError as exc:
+            raise _chat_http_exception(exc) from exc
+        return [_message_response(message) for message in messages]
+
+    @app.delete("/api/rag/threads/{thread_id}")
+    def delete_rag_thread_endpoint(
+        thread_id: str,
+        request: Request,
+    ) -> dict[str, str]:
+        project_id = _required_query_param(request, "projectId", "project_id")
+        user_id = _optional_query_param(request, "userId", "user_id")
+        try:
+            delete_chat_thread(
+                project_id=project_id,
+                user_id=user_id,
+                thread_id=thread_id,
+            )
+        except ValueError as exc:
+            raise _chat_http_exception(exc) from exc
+        return {"status": "deleted"}
+
+    @app.patch(
+        "/api/rag/threads/{thread_id}/title",
+        response_model=RagThreadResponse,
+    )
+    def update_rag_thread_title_endpoint(
+        thread_id: str,
+        request: RagThreadUpdateTitleRequest,
+    ) -> RagThreadResponse:
+        try:
+            thread = update_chat_thread_title(
+                project_id=request.project_id,
+                user_id=request.user_id,
+                thread_id=thread_id,
+                title=request.title,
+            )
+        except ValueError as exc:
+            raise _chat_http_exception(exc) from exc
+        return _thread_response(thread)
+
     return app
 
 
@@ -277,6 +543,32 @@ def _match_response(match: VectorSearchMatch) -> VectorSearchMatchResponse:
     return VectorSearchMatchResponse(**asdict(match))
 
 
+def _list_project_records() -> list[Project]:
+    with session_scope() as session:
+        rows = session.execute(
+            select(Project).order_by(desc(Project.updated_at), desc(Project.created_at))
+        ).scalars()
+        return list(rows)
+
+
+def _get_project_record(project_id: str) -> Project | None:
+    normalized_project_id = project_id.strip()
+    if not normalized_project_id:
+        raise HTTPException(status_code=400, detail="project_id must not be empty.")
+    with session_scope() as session:
+        return session.get(Project, normalized_project_id)
+
+
+def _project_response(project: Project) -> ProjectResponse:
+    return ProjectResponse(
+        id=project.id,
+        root_path=project.root_path,
+        name=project.name,
+        created_at=project.created_at.isoformat(),
+        updated_at=project.updated_at.isoformat(),
+    )
+
+
 def _rag_response(answer: RagAnswer) -> RagAskResponse:
     return RagAskResponse(
         answer=answer.answer,
@@ -304,6 +596,56 @@ def _rag_response(answer: RagAnswer) -> RagAskResponse:
     )
 
 
+def _thread_response(thread: RagThreadRecord) -> RagThreadResponse:
+    return RagThreadResponse(
+        id=thread.id,
+        project_id=thread.project_id,
+        user_id=thread.user_id,
+        thread_id=thread.thread_id,
+        title=thread.title,
+        created_at=thread.created_at.isoformat(),
+        updated_at=thread.updated_at.isoformat(),
+    )
+
+
+def _message_response(message: RagMessageRecord) -> RagMessageResponse:
+    return RagMessageResponse(
+        id=message.id,
+        thread_id=message.thread_id,
+        role=message.role,
+        content=message.content,
+        created_at=message.created_at.isoformat(),
+    )
+
+
+def _chat_http_exception(exc: ValueError) -> HTTPException:
+    message = str(exc)
+    status_code = 404 if "not found" in message else 400
+    return HTTPException(status_code=status_code, detail=message)
+
+
+def _resolved_thread_id(thread_id: str | None) -> str:
+    normalized = thread_id.strip() if thread_id else ""
+    if normalized:
+        return normalized
+    return f"thread:{uuid4().hex}"
+
+
+def _required_query_param(request: Request, *names: str) -> str:
+    value = _optional_query_param(request, *names)
+    if value is None:
+        raise HTTPException(status_code=422, detail=f"{names[0]} is required.")
+    return value
+
+
+def _optional_query_param(request: Request, *names: str) -> str | None:
+    for name in names:
+        value = request.query_params.get(name)
+        if value is not None and value.strip():
+            return value
+    return None
+
+
 def _rag_request_from_api(request: RagAskRequest) -> RagRequest:
     return RagRequest(
         question=request.question,
@@ -311,6 +653,7 @@ def _rag_request_from_api(request: RagAskRequest) -> RagRequest:
         project_path=request.project_path,
         thread_id=request.thread_id,
         user_id=request.user_id,
+        title=request.title,
         top_k=request.top_k,
         graph_depth=request.graph_depth,
         read_source=request.read_source,

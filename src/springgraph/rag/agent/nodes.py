@@ -24,6 +24,7 @@ def load_runtime_config(state: AgenticRagState) -> AgenticRagState:
     state["observations"] = []
     state["evidence"] = []
     state["source_snippets"] = []
+    state["conversation_history"] = []
     state["warnings"] = list(state.get("warnings", []))
     return state
 
@@ -48,13 +49,23 @@ def apply_request_defaults(state: AgenticRagState) -> AgenticRagState:
 
 def load_thread_memory(state: AgenticRagState) -> AgenticRagState:
     """Load minimal thread state."""
-    if not state["runtime_config"].memory.short_term_enabled:
+    memory_config = state["runtime_config"].memory
+    if not memory_config.short_term_enabled:
         return state
     if not state.get("load_memory", False):
         return state
-    memory = get_thread(state["thread_id"])
+    memory = get_thread(
+        state["thread_id"],
+        project_id=state.get("project_id"),
+        user_id=state.get("user_id"),
+    )
     if not state.get("project_path") and memory.project_path is not None:
         state["project_path"] = memory.project_path
+    state["conversation_history"] = _bounded_conversation_history(
+        memory.messages,
+        max_messages=memory_config.max_history_messages,
+        max_chars=memory_config.max_history_chars,
+    )
     if memory.last_question is not None:
         state["observations"].append(
             f"Thread memory last question: {memory.last_question}"
@@ -139,6 +150,7 @@ def generate_final_answer(state: AgenticRagState) -> AgenticRagState:
             : context_config.max_source_snippets
         ],
         observations=state.get("observations", []),
+        conversation_history=state.get("conversation_history", []),
         source_reading_skipped_reason=state.get("source_reading_skipped_reason"),
     )
     state["answer"] = invoke_agent_model(prompt)
@@ -149,6 +161,8 @@ def persist_turn_memory(state: AgenticRagState) -> AgenticRagState:
     """Persist minimal thread memory."""
     update_thread(
         state["thread_id"],
+        state["project_id"],
+        state.get("user_id"),
         state["project_path"],
         state["question"],
         state["answer"],
@@ -183,6 +197,31 @@ def _source_skip_reason(warnings: list[str]) -> str:
         if warning.startswith("source_read skipped:"):
             return warning.removeprefix("source_read skipped:").strip()
     return "source_read_returned_no_snippets"
+
+
+def _bounded_conversation_history(
+    messages: list[dict[str, str]],
+    max_messages: int,
+    max_chars: int,
+) -> list[dict[str, str]]:
+    if max_messages <= 0 or max_chars <= 0:
+        return []
+    selected: list[dict[str, str]] = []
+    remaining_chars = max_chars
+    for message in reversed(messages[-max_messages:]):
+        role = message.get("role", "").strip()
+        content = message.get("content", "").strip()
+        if not role or not content:
+            continue
+        if len(content) > remaining_chars:
+            content = content[:remaining_chars].rstrip()
+        if not content:
+            continue
+        selected.append({"role": role, "content": content})
+        remaining_chars -= len(content)
+        if remaining_chars <= 0:
+            break
+    return list(reversed(selected))
 
 
 def _step_signature(step: PlanStep) -> str:

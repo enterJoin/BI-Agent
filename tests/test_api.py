@@ -1,8 +1,11 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from springgraph import api
+from springgraph.rag.memory.store import RagMessageRecord, RagThreadRecord
 from springgraph.rag.schemas import (
     RagAnswer,
     RagEvidence,
@@ -11,6 +14,25 @@ from springgraph.rag.schemas import (
 )
 from springgraph.refinement._types import RefinementResult
 from springgraph.vector_search import VectorSearchMatch, VectorSearchResult
+
+
+@pytest.fixture(autouse=True)
+def stub_api_ensure_chat_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Avoid database writes in API tests unless a test overrides the stub."""
+    now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+    def fake_ensure_chat_thread(**kwargs: object) -> RagThreadRecord:
+        return RagThreadRecord(
+            id=999,
+            project_id=str(kwargs["project_id"]),
+            user_id=str(kwargs.get("user_id") or "1"),
+            thread_id=str(kwargs["thread_id"]),
+            title=str(kwargs["title"]),
+            created_at=now,
+            updated_at=now,
+        )
+
+    monkeypatch.setattr(api, "ensure_chat_thread", fake_ensure_chat_thread)
 
 
 def test_refine_endpoint_returns_refinement_summary(
@@ -43,6 +65,69 @@ def test_refine_endpoint_returns_refinement_summary(
         "chunks_upserted": 6,
         "embeddings_upserted": 7,
         "errors": [],
+    }
+
+
+def test_list_projects_endpoint_returns_indexed_projects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    project = api.Project(
+        id="project-1",
+        root_path="G:\\agent\\demo",
+        name="demo",
+        created_at=now,
+        updated_at=now,
+    )
+    monkeypatch.setattr(api, "_list_project_records", lambda: [project])
+
+    client = TestClient(api.app)
+    response = client.get("/api/projects")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": "project-1",
+            "root_path": "G:\\agent\\demo",
+            "name": "demo",
+            "created_at": "2026-01-02T03:04:05+00:00",
+            "updated_at": "2026-01-02T03:04:05+00:00",
+        }
+    ]
+
+
+def test_get_project_endpoint_returns_one_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    project = api.Project(
+        id="project-1",
+        root_path="G:\\agent\\demo",
+        name="demo",
+        created_at=now,
+        updated_at=now,
+    )
+    monkeypatch.setattr(api, "_get_project_record", lambda _: project)
+
+    client = TestClient(api.app)
+    response = client.get("/api/projects/project-1")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "project-1"
+    assert response.json()["root_path"] == "G:\\agent\\demo"
+
+
+def test_get_project_endpoint_returns_404_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api, "_get_project_record", lambda _: None)
+
+    client = TestClient(api.app)
+    response = client.get("/api/projects/project-missing")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "detail": "project_id was not found: project-missing"
     }
 
 
@@ -118,6 +203,52 @@ def test_vector_search_endpoint_accepts_project_id(monkeypatch: object) -> None:
     payload = response.json()
     assert payload["project_id"] == "project-1"
     assert payload["matches"] == []
+
+
+def test_vector_search_endpoint_creates_chat_thread_with_frontend_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = VectorSearchResult(
+        query="where is order stored",
+        project_id="project-1",
+        embedding_model="local-hash-embedding-v1",
+        embedding_dim=1024,
+        matches=[],
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(api, "search_project_vectors", lambda **_: expected)
+
+    def fake_ensure_chat_thread(**kwargs: object) -> RagThreadRecord:
+        captured["ensure"] = kwargs
+        return RagThreadRecord(
+            id=1,
+            project_id=str(kwargs["project_id"]),
+            user_id=str(kwargs["user_id"]),
+            thread_id=str(kwargs["thread_id"]),
+            title=str(kwargs["title"]),
+            created_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+
+    monkeypatch.setattr(api, "ensure_chat_thread", fake_ensure_chat_thread)
+
+    client = TestClient(api.app)
+    response = client.post(
+        "/api/vector_search",
+        json={"query": "where is order stored", "projectId": "project-1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["user_id"] == "1"
+    assert payload["thread_id"].startswith("thread:")
+    assert payload["title"] == "where is order stored"
+    assert captured["ensure"] == {
+        "project_id": "project-1",
+        "user_id": "1",
+        "thread_id": payload["thread_id"],
+        "title": "where is order stored",
+    }
 
 
 def test_vector_search_endpoint_requires_project_identifier() -> None:
@@ -304,7 +435,11 @@ def test_rag_ask_endpoint_accepts_project_id(
         "/api/rag/ask",
         json={
             "question": "这个项目有哪些接口？",
-            "project_id": "project-1",
+            "projectId": "project-1",
+            "topK": 3,
+            "graphDepth": 1,
+            "readSource": False,
+            "title": "first title",
             "project_path": "F:\\should-be-ignored-by-service",
         },
     )
@@ -388,7 +523,11 @@ def test_rag_ask_stream_endpoint_returns_sse_events(
         "/api/rag/ask/stream",
         json={
             "question": "订单服务都用到了哪些表？",
-            "project_id": "project-1",
+            "projectId": "project-1",
+            "topK": 3,
+            "graphDepth": 1,
+            "readSource": False,
+            "title": "first title",
         },
     )
 
@@ -405,6 +544,118 @@ def test_rag_ask_stream_endpoint_returns_sse_events(
     assert "event: done\ndata: {}" in response.text
     request = captured["request"]
     assert request.project_id == "project-1"  # type: ignore[attr-defined]
+    assert request.user_id == "1"  # type: ignore[attr-defined]
+    assert request.thread_id is None  # type: ignore[attr-defined]
+    assert request.title == "first title"  # type: ignore[attr-defined]
+    assert request.top_k == 3  # type: ignore[attr-defined]
+    assert request.graph_depth == 1  # type: ignore[attr-defined]
+    assert request.read_source is False  # type: ignore[attr-defined]
+
+
+def test_rag_thread_crud_endpoints(monkeypatch: object) -> None:
+    now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    thread = RagThreadRecord(
+        id=1,
+        project_id="project-1",
+        user_id="user-1",
+        thread_id="thread-1",
+        title="订单信息是在哪里存入的",
+        created_at=now,
+        updated_at=now,
+    )
+    message = RagMessageRecord(
+        id=10,
+        thread_id="thread-1",
+        role="user",
+        content="订单信息是在哪里存入的",
+        created_at=now,
+    )
+    captured: dict[str, object] = {}
+
+    def fake_create_chat_thread(**kwargs: object) -> RagThreadRecord:
+        captured["create"] = kwargs
+        return thread
+
+    def fake_list_chat_threads(**kwargs: object) -> list[RagThreadRecord]:
+        captured["list"] = kwargs
+        return [thread]
+
+    def fake_list_chat_messages(**kwargs: object) -> list[RagMessageRecord]:
+        captured["messages"] = kwargs
+        return [message]
+
+    def fake_update_chat_thread_title(**kwargs: object) -> RagThreadRecord:
+        captured["title"] = kwargs
+        return RagThreadRecord(
+            id=1,
+            project_id="project-1",
+            user_id="user-1",
+            thread_id="thread-1",
+            title=str(kwargs["title"]),
+            created_at=now,
+            updated_at=now,
+        )
+
+    def fake_delete_chat_thread(**kwargs: object) -> None:
+        captured["delete"] = kwargs
+
+    monkeypatch.setattr(api, "create_chat_thread", fake_create_chat_thread)
+    monkeypatch.setattr(api, "list_chat_threads", fake_list_chat_threads)
+    monkeypatch.setattr(api, "list_chat_messages", fake_list_chat_messages)
+    monkeypatch.setattr(
+        api,
+        "update_chat_thread_title",
+        fake_update_chat_thread_title,
+    )
+    monkeypatch.setattr(api, "delete_chat_thread", fake_delete_chat_thread)
+
+    client = TestClient(api.app)
+    create_response = client.post(
+        "/api/rag/threads",
+        json={
+            "project_id": "project-1",
+            "user_id": "user-1",
+            "thread_id": "thread-1",
+            "first_question": "订单信息是在哪里存入的",
+        },
+    )
+    list_response = client.get(
+        "/api/rag/threads",
+        params={"project_id": "project-1", "user_id": "user-1"},
+    )
+    messages_response = client.get(
+        "/api/rag/threads/thread-1/messages",
+        params={"project_id": "project-1", "user_id": "user-1"},
+    )
+    title_response = client.patch(
+        "/api/rag/threads/thread-1/title",
+        json={
+            "project_id": "project-1",
+            "user_id": "user-1",
+            "title": "订单持久化位置",
+        },
+    )
+    delete_response = client.delete(
+        "/api/rag/threads/thread-1",
+        params={"project_id": "project-1", "user_id": "user-1"},
+    )
+
+    assert create_response.status_code == 200
+    assert create_response.json()["title"] == "订单信息是在哪里存入的"
+    assert list_response.status_code == 200
+    assert list_response.json()[0]["thread_id"] == "thread-1"
+    assert messages_response.status_code == 200
+    assert messages_response.json()[0]["content"] == "订单信息是在哪里存入的"
+    assert title_response.status_code == 200
+    assert title_response.json()["title"] == "订单持久化位置"
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {"status": "deleted"}
+    assert captured["create"] == {
+        "project_id": "project-1",
+        "user_id": "user-1",
+        "title": "订单信息是在哪里存入的",
+        "thread_id": "thread-1",
+    }
 
 
 def test_rag_ask_endpoint_requires_project_identifier() -> None:

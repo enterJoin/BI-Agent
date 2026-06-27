@@ -15,6 +15,7 @@ class RagRequest:
     project_path: str | None = None
     thread_id: str | None = None
     user_id: str | None = None
+    title: str | None = None
     top_k: int = 8
     graph_depth: int = 2
     read_source: bool = True

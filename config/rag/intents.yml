@@ -1,0 +1,79 @@
+intents:
+  persistence_location:
+    description: "Questions about where business data is saved, inserted, written, persisted, or stored."
+    default_tool: aggregate_query
+    default_filters:
+      group_by: table_name
+    chinese_terms:
+      - 入库
+      - 存入
+      - 存到
+      - 存储
+      - 保存
+      - 写入
+      - 落库
+      - 持久化
+      - 插入
+      - 新增
+    english_terms:
+      - persist
+      - persistence
+      - save
+      - insert
+      - write
+      - store
+      - storage
+      - repository
+      - dao
+
+  table_usage:
+    description: "Questions about which database tables, entities, mappers, SQL, or table-like artifacts are used."
+    default_tool: aggregate_query
+    default_filters:
+      group_by: table_name
+    chinese_terms:
+      - 表
+      - 数据库
+      - 数据表
+      - 用到了哪些表
+    english_terms:
+      - table
+      - mapper
+      - entity
+      - sql
+      - db_table
+
+  api_entrypoint:
+    description: "Questions about HTTP APIs, routes, controllers, endpoints, and interface entrypoints."
+    default_tool: artifact_search
+    default_filters:
+      kinds:
+        - route
+        - class
+        - method
+    chinese_terms:
+      - 接口
+      - 路由
+      - 入口
+    english_terms:
+      - api
+      - endpoint
+      - route
+      - controller
+      - mapping
+
+  execution_flow:
+    description: "Questions about execution flow, call chain, processing stages, or how a feature works."
+    default_tool: artifact_search
+    default_filters: {}
+    chinese_terms:
+      - 流程
+      - 链路
+      - 怎么执行
+      - 怎么处理
+      - 调用链
+    english_terms:
+      - flow
+      - call chain
+      - process
+      - execution

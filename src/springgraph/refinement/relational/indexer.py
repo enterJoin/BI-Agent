@@ -1,7 +1,9 @@
 """Project indexing orchestration."""
 
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any, cast
 
 from sqlalchemy import Table, delete, func, select
@@ -23,23 +25,42 @@ from springgraph.refinement.relational.resolver import resolve_project_refs
 from springgraph.refinement.relational.resource_config import extract_config_file
 from springgraph.refinement.relational.scanner import ScannedFile, scan_project
 
+logger = logging.getLogger(__name__)
+
 
 def index_project(root: Path, session: Session) -> int:
     """Index a Java Spring Boot project or workspace path."""
     root = root.resolve()
     project_id_value = project_id(root)
+    started_at = perf_counter()
+    logger.info(
+        "Relational indexing started: project_id=%s, root=%s",
+        project_id_value,
+        root,
+    )
     _upsert_project(session, project_id_value, root)
     run = IndexRun(project_id=project_id_value, status="running")
     session.add(run)
     session.flush()
 
     errors: list[str] = []
+    scan_started_at = perf_counter()
     scanned_files = scan_project(root)
+    logger.info(
+        "Relational scan completed: project_id=%s, files=%s, "
+        "elapsed_seconds=%.3f",
+        project_id_value,
+        len(scanned_files),
+        perf_counter() - scan_started_at,
+    )
     files_indexed = 0
+    extraction_started_at = perf_counter()
+    skipped_unchanged = 0
     for scanned_file in scanned_files:
         try:
             changed = _upsert_file(session, project_id_value, scanned_file)
             if not changed:
+                skipped_unchanged += 1
                 continue
             _delete_file_symbols(session, project_id_value, scanned_file.relative_path)
             result = _extract_file(project_id_value, scanned_file)
@@ -64,11 +85,39 @@ def index_project(root: Path, session: Session) -> int:
             errors.extend(result.errors)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{scanned_file.relative_path}: {exc}")
+            logger.warning(
+                "Relational file indexing failed: project_id=%s, file=%s, "
+                "error=%s",
+                project_id_value,
+                scanned_file.relative_path,
+                exc,
+            )
             _mark_file_error(
                 session, project_id_value, scanned_file.relative_path, str(exc)
             )
+    logger.info(
+        "Relational file indexing completed: project_id=%s, processed=%s, "
+        "indexed=%s, skipped_unchanged=%s, errors=%s, elapsed_seconds=%.3f",
+        project_id_value,
+        len(scanned_files),
+        files_indexed,
+        skipped_unchanged,
+        len(errors),
+        perf_counter() - extraction_started_at,
+    )
 
+    resolve_started_at = perf_counter()
+    logger.info(
+        "Relational reference resolution started: project_id=%s",
+        project_id_value,
+    )
     resolve_project_refs(session, project_id_value)
+    logger.info(
+        "Relational reference resolution completed: project_id=%s, "
+        "elapsed_seconds=%.3f",
+        project_id_value,
+        perf_counter() - resolve_started_at,
+    )
     run.status = "completed" if not errors else "completed_with_errors"
     run.finished_at = datetime.now(tz=UTC)
     run.files_seen = len(scanned_files)
@@ -78,6 +127,20 @@ def index_project(root: Path, session: Session) -> int:
     run.unresolved_created = _count(session, UnresolvedRef, project_id_value)
     run.errors = errors
     session.flush()
+    logger.info(
+        "Relational indexing completed: project_id=%s, index_run_id=%s, "
+        "files_seen=%s, files_indexed=%s, symbols=%s, edges=%s, "
+        "unresolved_refs=%s, errors=%s, elapsed_seconds=%.3f",
+        project_id_value,
+        run.id,
+        run.files_seen,
+        run.files_indexed,
+        run.symbols_created,
+        run.edges_created,
+        run.unresolved_created,
+        len(errors),
+        perf_counter() - started_at,
+    )
     return run.id
 
 

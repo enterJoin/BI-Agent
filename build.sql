@@ -239,6 +239,26 @@ CREATE TABLE IF NOT EXISTS embedding_jobs (
     finished_at TIMESTAMPTZ
 );
 
+-- RAG chat threads and messages.
+CREATE TABLE IF NOT EXISTS rag_threads (
+    id BIGSERIAL PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (project_id, user_id, thread_id)
+);
+
+CREATE TABLE IF NOT EXISTS rag_messages (
+    id BIGSERIAL PRIMARY KEY,
+    thread_db_id BIGINT NOT NULL REFERENCES rag_threads(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- RAG execution, evidence, feedback, and memory are relational tables.
 -- The vector table remains chunk_embeddings.embedding.
 CREATE TABLE IF NOT EXISTS rag_runs (
@@ -321,6 +341,12 @@ ON code_chunks USING gin(to_tsvector('simple', content));
 
 CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_project_model
 ON chunk_embeddings(project_id, embedding_model, embedding_dim, status);
+
+CREATE INDEX IF NOT EXISTS idx_rag_threads_project_user_updated
+ON rag_threads(project_id, user_id, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_rag_messages_thread_created
+ON rag_messages(thread_db_id, created_at, id);
 
 CREATE INDEX IF NOT EXISTS idx_rag_runs_project_thread
 ON rag_runs(project_id, thread_id, created_at DESC);

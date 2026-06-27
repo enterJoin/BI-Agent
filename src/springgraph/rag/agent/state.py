@@ -11,6 +11,7 @@ class QuestionUnderstanding(TypedDict, total=False):
     """Structured question understanding returned by LLM."""
 
     task_goal: str
+    intent: str
     sub_questions: list[str]
     business_terms: list[str]
     technical_terms: list[str]
@@ -57,5 +58,6 @@ class AgenticRagState(TypedDict, total=False):
     observations: list[str]
     evidence: list[RagEvidence]
     source_snippets: list[SourceSnippet]
+    conversation_history: list[dict[str, str]]
     answer: str
     warnings: list[str]
