@@ -35,8 +35,8 @@ class FakeAgenticGraph:
                 content="insert",
             )
         ]
-        state["used_tools"] = ["db_mapping_search", "source_reader"]
-        state["observations"] = ["DB mapping search returned 1 evidence items."]
+        state["used_tools"] = ["aggregate_query", "source_read"]
+        state["observations"] = ["Aggregate table query returned 1 evidence items."]
         state["source_reading_skipped_reason"] = None
         return state
 
@@ -61,7 +61,7 @@ def test_ask_project_agentic_mode_uses_agentic_graph(
 
     assert answer.mode == "agentic"
     assert answer.intent == "追踪数据入库链路"
-    assert answer.used_tools == ["db_mapping_search", "source_reader"]
+    assert answer.used_tools == ["aggregate_query", "source_read"]
     assert answer.used_relational_search is True
     assert answer.used_source_reading is True
     assert answer.expanded_queries[:3] == ["素材数据怎么入库？", "素材", "Mapper"]

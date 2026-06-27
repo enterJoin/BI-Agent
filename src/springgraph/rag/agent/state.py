@@ -1,6 +1,6 @@
 """State for the controlled Agentic RAG graph."""
 
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from springgraph.rag.config.models import AgenticRagConfig, ToolConfig
 from springgraph.rag.schemas import RagEvidence, SourceSnippet
@@ -18,21 +18,20 @@ class QuestionUnderstanding(TypedDict, total=False):
     expected_evidence: list[str]
 
 
-class AgentAction(TypedDict, total=False):
-    """Next action chosen by the agent."""
+class PlanStep(TypedDict, total=False):
+    """One planned retrieval step."""
 
-    action: str
     tool_name: str
     query: str
+    filters: dict[str, Any]
     reason: str
 
 
-class EvidenceJudgeResult(TypedDict, total=False):
-    """Evidence sufficiency decision."""
+class RetrievalPlan(TypedDict, total=False):
+    """A structured retrieval plan generated once per question."""
 
-    evidence_sufficient: bool
-    missing_information: list[str]
-    suggested_next_tools: list[str]
+    task_goal: str
+    steps: list[PlanStep]
 
 
 class AgenticRagState(TypedDict, total=False):
@@ -48,12 +47,10 @@ class AgenticRagState(TypedDict, total=False):
     read_source: bool
     runtime_config: AgenticRagConfig
     tool_configs: list[ToolConfig]
-    candidate_tools: list[str]
     source_available: bool
     source_reading_skipped_reason: str | None
     question_understanding: QuestionUnderstanding
-    next_action: AgentAction
-    judge_result: EvidenceJudgeResult
+    retrieval_plan: RetrievalPlan
     tool_results: list[ToolResult]
     used_tools: list[str]
     observations: list[str]
@@ -61,8 +58,3 @@ class AgenticRagState(TypedDict, total=False):
     source_snippets: list[SourceSnippet]
     answer: str
     warnings: list[str]
-    iteration: int
-    tool_call_count: int
-    no_new_evidence_rounds: int
-    last_source_read_evidence_count: int
-    should_continue: bool

@@ -68,13 +68,12 @@ def _ask_project_agentic(
         intent=intent,
         rewritten_query=question,
         expanded_queries=expanded_queries,
-        used_vector_search="vector_search" in final_state.get("used_tools", []),
+        used_vector_search=False,
         used_relational_search=bool(
             {
-                "relational_search",
-                "call_graph_search",
-                "db_mapping_search",
-                "config_search",
+                "artifact_search",
+                "relation_search",
+                "aggregate_query",
             }.intersection(final_state.get("used_tools", []))
         ),
         used_source_reading=bool(final_state.get("source_snippets")),

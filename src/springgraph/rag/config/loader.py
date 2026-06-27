@@ -8,7 +8,6 @@ import yaml
 from springgraph.rag.config.models import (
     AgenticRagConfig,
     ContextConfig,
-    LoopConfig,
     MemoryConfig,
     RetrievalConfig,
     SafetyConfig,
@@ -22,7 +21,6 @@ def load_agentic_rag_config() -> AgenticRagConfig:
     data = _load_yaml(_config_path("agentic_rag.yml"))
     agent = _mapping(data.get("agent"))
     return AgenticRagConfig(
-        loop=LoopConfig(**_mapping(agent.get("loop"))),
         retrieval=RetrievalConfig(**_mapping(agent.get("retrieval"))),
         source_reading=SourceReadingConfig(
             **_mapping(agent.get("source_reading"))

@@ -22,23 +22,6 @@ class RagRequest:
 
 
 @dataclass(frozen=True)
-class RagPlan:
-    """Query plan produced before retrieval."""
-
-    intent: RagIntent
-    original_question: str
-    rewritten_query: str
-    expanded_queries: list[str]
-    entities: list[str] = field(default_factory=list)
-    use_vector_search: bool = True
-    use_relational_search: bool = True
-    relation_expansion: bool = True
-    need_source_reading: bool = True
-    top_k: int = 8
-    graph_depth: int = 2
-
-
-@dataclass(frozen=True)
 class RagEvidence:
     """One evidence item retrieved from vector or relational storage."""
 

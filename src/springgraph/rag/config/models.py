@@ -4,15 +4,6 @@ from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
-class LoopConfig:
-    """Loop limits for the controlled agent."""
-
-    max_iterations: int
-    max_tool_calls: int
-    stop_when_no_new_evidence_rounds: int
-
-
-@dataclass(frozen=True)
 class RetrievalConfig:
     """Retrieval limits used by tools."""
 
@@ -20,7 +11,6 @@ class RetrievalConfig:
     max_top_k: int
     default_graph_depth: int
     max_graph_depth: int
-    top_candidate_tools: int
 
 
 @dataclass(frozen=True)
@@ -62,7 +52,6 @@ class SafetyConfig:
 class AgenticRagConfig:
     """Runtime configuration for Agentic RAG."""
 
-    loop: LoopConfig
     retrieval: RetrievalConfig
     source_reading: SourceReadingConfig
     context: ContextConfig

@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from springgraph.rag.config.models import ToolConfig
 from springgraph.rag.schemas import RagEvidence, SourceSnippet
@@ -13,6 +13,7 @@ class ToolInput:
     """Common input passed to a RAG tool."""
 
     query: str
+    filters: dict[str, Any]
     project_id: str
     project_path: Path
     top_k: int

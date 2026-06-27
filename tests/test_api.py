@@ -334,8 +334,8 @@ def test_rag_ask_endpoint_accepts_agentic_mode(
             source_snippets=[],
             warnings=[],
             mode="agentic",
-            used_tools=["vector_search"],
-            observations=["Vector search returned 0 evidence items."],
+            used_tools=["artifact_search"],
+            observations=["Artifact search returned 0 evidence items."],
         )
 
     monkeypatch.setattr(api, "ask_project", fake_ask_project)
@@ -353,7 +353,7 @@ def test_rag_ask_endpoint_accepts_agentic_mode(
     assert response.status_code == 200
     payload = response.json()
     assert payload["mode"] == "agentic"
-    assert payload["used_tools"] == ["vector_search"]
+    assert payload["used_tools"] == ["artifact_search"]
     request = captured["request"]
     assert request.mode == "agentic"  # type: ignore[attr-defined]
 

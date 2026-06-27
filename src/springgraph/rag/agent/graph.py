@@ -26,10 +26,8 @@ def build_agentic_rag_graph() -> RunnableAgenticGraph:
     graph.add_node("load_thread_memory", nodes.load_thread_memory)
     graph.add_node("check_project_source_path", nodes.check_project_source_path)
     graph.add_node("understand_question", nodes.understand_question)
-    graph.add_node("propose_candidate_tools", nodes.propose_candidate_tools)
-    graph.add_node("decide_next_action", nodes.decide_next_action)
-    graph.add_node("execute_tool", nodes.execute_tool)
-    graph.add_node("judge_evidence", nodes.judge_evidence)
+    graph.add_node("create_retrieval_plan", nodes.create_retrieval_plan)
+    graph.add_node("execute_retrieval_plan", nodes.execute_retrieval_plan)
     graph.add_node("generate_final_answer", nodes.generate_final_answer)
     graph.add_node("persist_turn_memory", nodes.persist_turn_memory)
 
@@ -38,25 +36,9 @@ def build_agentic_rag_graph() -> RunnableAgenticGraph:
     graph.add_edge("apply_request_defaults", "load_thread_memory")
     graph.add_edge("load_thread_memory", "check_project_source_path")
     graph.add_edge("check_project_source_path", "understand_question")
-    graph.add_edge("understand_question", "propose_candidate_tools")
-    graph.add_edge("propose_candidate_tools", "decide_next_action")
-    graph.add_conditional_edges(
-        "decide_next_action",
-        nodes.route_after_decision,
-        {
-            "execute_tool": "execute_tool",
-            "generate_final_answer": "generate_final_answer",
-        },
-    )
-    graph.add_edge("execute_tool", "judge_evidence")
-    graph.add_conditional_edges(
-        "judge_evidence",
-        nodes.route_after_judge,
-        {
-            "decide_next_action": "decide_next_action",
-            "generate_final_answer": "generate_final_answer",
-        },
-    )
+    graph.add_edge("understand_question", "create_retrieval_plan")
+    graph.add_edge("create_retrieval_plan", "execute_retrieval_plan")
+    graph.add_edge("execute_retrieval_plan", "generate_final_answer")
     graph.add_edge("generate_final_answer", "persist_turn_memory")
     graph.add_edge("persist_turn_memory", END)
     return cast(RunnableAgenticGraph, graph.compile())
@@ -73,18 +55,10 @@ class _FallbackAgenticGraph:
             nodes.load_thread_memory,
             nodes.check_project_source_path,
             nodes.understand_question,
-            nodes.propose_candidate_tools,
+            nodes.create_retrieval_plan,
+            nodes.execute_retrieval_plan,
         ):
             state = cast(Any, node)(state)
-
-        while True:
-            state = nodes.decide_next_action(state)
-            if nodes.route_after_decision(state) == "generate_final_answer":
-                break
-            state = nodes.execute_tool(state)
-            state = nodes.judge_evidence(state)
-            if nodes.route_after_judge(state) == "generate_final_answer":
-                break
 
         state = nodes.generate_final_answer(state)
         return nodes.persist_turn_memory(state)
