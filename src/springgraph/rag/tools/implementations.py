@@ -15,6 +15,12 @@ from springgraph.rag.intent import TABLE_RETRIEVAL_INTENTS, infer_query_intent
 from springgraph.rag.library_hints import load_query_hints
 from springgraph.rag.schemas import RagEvidence
 from springgraph.rag.source_reader import check_source_path, read_source_snippets
+from springgraph.rag.target_trace import (
+    persistence_edge_kinds,
+    source_priority,
+    table_target_kinds,
+    target_candidates,
+)
 from springgraph.rag.tools.schemas import RagTool, ToolInput, ToolResult
 
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$.:/-]*")
@@ -54,8 +60,6 @@ _GENERIC_QUERY_EXPANSIONS = {
     "api": ["endpoint", "route", "controller", "mapping"],
     "endpoint": ["api", "route", "controller", "mapping"],
 }
-
-
 @dataclass(frozen=True)
 class ArtifactSearchTool:
     """Batch search code artifacts from relational indexes."""
@@ -217,6 +221,62 @@ class AggregateQueryTool:
 
 
 @dataclass(frozen=True)
+class TargetTraceTool:
+    """Resolve one explicit target and trace its indexed relations."""
+
+    config: ToolConfig
+
+    def invoke(self, tool_input: ToolInput) -> ToolResult:
+        filters = tool_input.filters
+        target_terms = _target_candidates(tool_input.query, filters)
+        if not target_terms:
+            return ToolResult(
+                tool_name=self.config.name,
+                summary=(
+                    "Target trace found no explicit target in the query or filters."
+                ),
+                evidence=tool_input.evidence,
+                warnings=["target_trace skipped: no explicit target"],
+            )
+
+        intent = _optional_string(filters.get("intent"))
+        target_kind = _optional_string(filters.get("target_kind"))
+        direction = _trace_direction(filters)
+        edge_kinds = _trace_edge_kinds(intent, filters)
+        limit = _limit(tool_input.top_k, multiplier=6)
+
+        with session_scope() as session:
+            target_rows = _resolve_target_symbols(
+                session=session,
+                project_id=tool_input.project_id,
+                target_terms=target_terms,
+                target_kind=target_kind,
+                limit=limit,
+            )
+            relation_rows = _trace_target_relations(
+                session=session,
+                project_id=tool_input.project_id,
+                target_rows=target_rows,
+                direction=direction,
+                edge_kinds=edge_kinds,
+                limit=limit,
+            )
+
+        evidence = _target_match_evidence(target_rows)
+        evidence.extend(_target_relation_evidence(relation_rows))
+        evidence = _prioritize_trace_evidence(_dedupe(evidence))
+        return ToolResult(
+            tool_name=self.config.name,
+            summary=(
+                f"Target trace targets={target_terms}, target_kind={target_kind!r}, "
+                f"direction={direction!r}, edge_kinds={edge_kinds} returned "
+                f"{len(evidence)} evidence items."
+            ),
+            evidence=evidence,
+        )
+
+
+@dataclass(frozen=True)
 class SourceReadTool:
     """Read source snippets for selected evidence."""
 
@@ -259,6 +319,8 @@ def create_tool(config: ToolConfig) -> RagTool:
         return RelationSearchTool(config)
     if config.name == "aggregate_query":
         return AggregateQueryTool(config)
+    if config.name == "target_trace":
+        return TargetTraceTool(config)
     if config.name == "source_read":
         return SourceReadTool(config)
     raise ValueError(f"Unsupported RAG tool implementation: {config.name}")
@@ -339,6 +401,251 @@ def _aggregate_tables(config: ToolConfig, tool_input: ToolInput) -> ToolResult:
             f"{len(evidence)} table evidence items."
         ),
         evidence=evidence,
+    )
+
+
+def _target_candidates(query: str, filters: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    explicit_target = _optional_string(filters.get("target"))
+    if explicit_target:
+        values.append(explicit_target)
+    values.extend(_string_list(filters.get("targets")))
+    return target_candidates(query, values)
+
+
+def _trace_direction(filters: dict[str, Any]) -> str:
+    direction = _optional_string(filters.get("direction"))
+    if direction in {"incoming", "outgoing", "both"}:
+        return direction
+    return "incoming"
+
+
+def _trace_edge_kinds(intent: str | None, filters: dict[str, Any]) -> list[str]:
+    edge_kinds = _string_list(filters.get("edge_kinds"))
+    if edge_kinds:
+        return edge_kinds
+    if intent == "persistence_location":
+        return persistence_edge_kinds()
+    return []
+
+
+def _resolve_target_symbols(
+    session: Any,
+    project_id: str,
+    target_terms: list[str],
+    target_kind: str | None,
+    limit: int,
+) -> list[tuple[Symbol, File]]:
+    if not target_terms:
+        return []
+    filters = []
+    for term in target_terms[:8]:
+        pattern = f"%{term}%"
+        filters.extend(
+            [
+                Symbol.name.ilike(pattern),
+                Symbol.qualified_name.ilike(pattern),
+                Symbol.meta.cast(Text).ilike(pattern),
+                File.path.ilike(pattern),
+            ]
+        )
+    statement = (
+        select(Symbol, File)
+        .join(File, File.id == Symbol.file_id)
+        .where(Symbol.project_id == project_id)
+        .where(or_(*filters))
+    )
+    if target_kind:
+        statement = statement.where(Symbol.kind == target_kind)
+    rows = session.execute(statement.limit(limit)).all()
+    return _rank_target_rows(rows, target_terms)
+
+
+def _rank_target_rows(
+    rows: list[tuple[Symbol, File]],
+    target_terms: list[str],
+) -> list[tuple[Symbol, File]]:
+    def rank(row: tuple[Symbol, File]) -> tuple[int, str, str]:
+        symbol, file_row = row
+        haystack = _target_haystack(symbol, file_row)
+        exact = any(_target_exact_match(symbol, term) for term in target_terms)
+        table_match = symbol.kind in table_target_kinds() and exact
+        partial = any(term.lower() in haystack for term in target_terms)
+        if table_match:
+            priority = 0
+        elif exact:
+            priority = 1
+        elif partial:
+            priority = 2
+        else:
+            priority = 5
+        return (priority, file_row.path, symbol.qualified_name)
+
+    ranked = sorted(rows, key=rank)
+    return ranked
+
+
+def _target_haystack(symbol: Symbol, file_row: File) -> str:
+    return " ".join(
+        [
+            symbol.name,
+            symbol.qualified_name,
+            str(_json_safe(symbol.meta)),
+            file_row.path,
+        ]
+    ).lower()
+
+
+def _target_exact_match(symbol: Symbol, term: str) -> bool:
+    lowered = term.lower()
+    metadata_table = _metadata_string(symbol.meta, "table")
+    values = [symbol.name, symbol.qualified_name]
+    if metadata_table is not None:
+        values.append(metadata_table)
+    return any(value.lower() == lowered for value in values)
+
+
+def _trace_target_relations(
+    session: Any,
+    project_id: str,
+    target_rows: list[tuple[Symbol, File]],
+    direction: str,
+    edge_kinds: list[str],
+    limit: int,
+) -> list[tuple[Edge, Symbol, Symbol, File]]:
+    target_ids = _trace_target_ids(target_rows)
+    if not target_ids:
+        return []
+    from sqlalchemy.orm import aliased
+
+    source = aliased(Symbol)
+    target = aliased(Symbol)
+    file_alias = aliased(File)
+    statement = (
+        select(Edge, source, target, file_alias)
+        .join(source, source.id == Edge.source_id)
+        .join(target, target.id == Edge.target_id)
+        .join(file_alias, file_alias.id == source.file_id)
+        .where(Edge.project_id == project_id)
+        .limit(limit)
+    )
+    relation_filters = []
+    if direction in {"incoming", "both"}:
+        relation_filters.append(Edge.target_id.in_(target_ids))
+    if direction in {"outgoing", "both"}:
+        relation_filters.append(Edge.source_id.in_(target_ids))
+    if relation_filters:
+        statement = statement.where(or_(*relation_filters))
+    if edge_kinds:
+        statement = statement.where(Edge.kind.in_(edge_kinds))
+    rows = session.execute(statement).all()
+    return _rank_relation_rows(rows)
+
+
+def _trace_target_ids(target_rows: list[tuple[Symbol, File]]) -> list[str]:
+    result: list[str] = []
+    for symbol, _ in target_rows:
+        if symbol.kind in {"db_column"}:
+            continue
+        if symbol.id not in result:
+            result.append(symbol.id)
+    return result
+
+
+def _rank_relation_rows(
+    rows: list[tuple[Edge, Symbol, Symbol, File]],
+) -> list[tuple[Edge, Symbol, Symbol, File]]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            source_priority(f"edge:{row[0].kind}"),
+            row[3].path,
+            row[0].line or 0,
+        ),
+    )
+
+
+def _target_match_evidence(rows: list[tuple[Symbol, File]]) -> list[RagEvidence]:
+    evidence: list[RagEvidence] = []
+    for symbol, file_row in rows:
+        table_name = _metadata_string(symbol.meta, "table")
+        details = [
+            f"target={symbol.qualified_name}",
+            f"kind={symbol.kind}",
+        ]
+        if table_name:
+            details.append(f"table={table_name}")
+        evidence.append(
+            RagEvidence(
+                evidence_type="target_match",
+                source="target_trace",
+                file_path=file_row.path,
+                start_line=symbol.start_line,
+                end_line=symbol.end_line,
+                symbol=symbol.qualified_name,
+                score=1.0,
+                content_excerpt="; ".join(details),
+                metadata={
+                    "symbol_id": symbol.id,
+                    "kind": symbol.kind,
+                    "name": symbol.name,
+                    "table": table_name,
+                    "module_name": file_row.module_name,
+                    "service_name": file_row.service_name,
+                    "metadata": _json_safe(symbol.meta),
+                },
+            )
+        )
+    return evidence
+
+
+def _target_relation_evidence(
+    rows: list[tuple[Edge, Symbol, Symbol, File]],
+) -> list[RagEvidence]:
+    evidence: list[RagEvidence] = []
+    for edge, source, target, file_row in rows:
+        table_name = _metadata_string(target.meta, "table")
+        evidence.append(
+            RagEvidence(
+                evidence_type=f"target_relation:{edge.kind}",
+                source="target_trace",
+                file_path=file_row.path,
+                start_line=edge.line,
+                end_line=edge.line,
+                symbol=f"{source.qualified_name} -> {target.qualified_name}",
+                score=float(edge.confidence),
+                content_excerpt=(
+                    f"{source.qualified_name} {edge.kind} "
+                    f"{target.qualified_name}; source_kind={source.kind}; "
+                    f"target_kind={target.kind}"
+                ),
+                metadata={
+                    "edge_id": edge.id,
+                    "edge_kind": edge.kind,
+                    "source_symbol_id": source.id,
+                    "target_symbol_id": target.id,
+                    "source_symbol": source.qualified_name,
+                    "target_symbol": target.qualified_name,
+                    "source_kind": source.kind,
+                    "target_kind": target.kind,
+                    "table": table_name,
+                    "resolved_by": edge.resolved_by,
+                    "metadata": _json_safe(edge.meta),
+                },
+            )
+        )
+    return evidence
+
+
+def _prioritize_trace_evidence(items: list[RagEvidence]) -> list[RagEvidence]:
+    return sorted(
+        items,
+        key=lambda item: (
+            source_priority(item.evidence_type),
+            item.file_path or "",
+            item.start_line or 0,
+            item.symbol or "",
+        ),
     )
 
 

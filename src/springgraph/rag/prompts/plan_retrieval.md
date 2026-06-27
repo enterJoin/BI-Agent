@@ -44,6 +44,9 @@ Tool selection guidance:
   around matched evidence.
 - aggregate_query: aggregate evidence and relational indexes, such as listing
   tables by module or grouping flow stages.
+- target_trace: resolve an explicit target such as a table, method, route,
+  external API, config key, message topic, or cache key, then trace incoming or
+  outgoing writes, reads, calls, references, or usage relations.
 - source_read: read source snippets only when source reading is allowed and
   prior evidence has file paths.
 
@@ -70,6 +73,13 @@ landed, or 入库/存入/保存/写入/落库/持久化, prefer:
    project query hints.
 3. Add source_read only when exact source details are requested or source
    reading is allowed and useful.
+
+For questions asking where a specific method, class, route, external interface,
+config key, message topic, cache key, table, entity, or mapper is called, used,
+consumed, referenced, written, or read, prefer target_trace with filters.target,
+filters.direction=incoming, and relevant filters.edge_kinds when known. Follow
+with source_read when source reading is allowed and target_trace returns file
+evidence.
 
 For questions asking which tables a system/module uses, prefer:
 1. aggregate_query with filters.intent=table_usage and group_by=table_name.

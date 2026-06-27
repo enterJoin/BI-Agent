@@ -18,7 +18,7 @@ agent:
   memory:
     short_term_enabled: true
     long_term_enabled: false
-    max_history_messages: 6
+    max_history_messages: 16
     max_history_chars: 4000
 
   safety:

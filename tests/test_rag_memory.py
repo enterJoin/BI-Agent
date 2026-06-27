@@ -9,7 +9,8 @@ from springgraph.rag.config.models import (
     SourceReadingConfig,
 )
 from springgraph.rag.memory.store import get_thread
-from springgraph.rag.schemas import RagEvidence
+from springgraph.rag.schemas import RagEvidence, SourceSnippet
+from springgraph.rag.tools.schemas import ToolInput, ToolResult
 
 
 def test_load_thread_memory_bounds_conversation_history() -> None:
@@ -21,6 +22,7 @@ def test_load_thread_memory_bounds_conversation_history() -> None:
         {"role": "user", "content": "new1"},
         {"role": "assistant", "content": "new2"},
     ]
+    memory.last_question = "new1"
 
     state = nodes.load_thread_memory(
         {
@@ -37,6 +39,9 @@ def test_load_thread_memory_bounds_conversation_history() -> None:
     assert len(history) <= 3
     assert sum(len(item["content"]) for item in history) <= 9
     assert history[-1] == {"role": "assistant", "content": "new2"}
+    assert state["observations"] == [
+        "Thread memory is available for follow-up context."
+    ]
 
 
 def test_generate_final_answer_includes_conversation_history(
@@ -79,13 +84,106 @@ def test_generate_final_answer_includes_conversation_history(
     result = nodes.generate_final_answer(state)
 
     assert result["answer"] == "answer"
-    assert "Conversation history:" in captured["prompt"]
+    assert captured["prompt"].index("Current question:") < captured["prompt"].index(
+        "Conversation history for reference only:"
+    )
+    assert "Conversation history for reference only:" in captured["prompt"]
     assert (
         "user: \u8ba2\u5355\u4fe1\u606f\u5b58\u5728\u54ea\u91cc"
         in captured["prompt"]
     )
     assert "assistant: \u5b58\u5728 oms_order" in captured["prompt"]
     assert "Evidence:" in captured["prompt"]
+
+
+def test_execute_retrieval_plan_auto_reads_target_trace_source(
+    monkeypatch: object,
+) -> None:
+    calls: list[str] = []
+
+    class FakeTargetTraceTool:
+        def invoke(self, tool_input: ToolInput) -> ToolResult:
+            calls.append("target_trace")
+            return ToolResult(
+                tool_name="target_trace",
+                summary="target trace",
+                evidence=[
+                    RagEvidence(
+                        evidence_type="target_relation:writes_table",
+                        source="target_trace",
+                        file_path="src/main/java/OrderOperateHistoryDao.java",
+                        start_line=15,
+                        end_line=15,
+                        symbol=(
+                            "mapper:OrderOperateHistoryDao -> "
+                            "db_table:oms_order_operate_history"
+                        ),
+                    )
+                ],
+            )
+
+    class FakeSourceReadTool:
+        def invoke(self, tool_input: ToolInput) -> ToolResult:
+            calls.append("source_read")
+            assert tool_input.evidence[0].evidence_type == (
+                "target_relation:writes_table"
+            )
+            return ToolResult(
+                tool_name="source_read",
+                summary="source read",
+                source_snippets=[
+                    SourceSnippet(
+                        file_path="src/main/java/OrderOperateHistoryDao.java",
+                        start_line=12,
+                        end_line=18,
+                        content="interface OrderOperateHistoryDao",
+                    )
+                ],
+            )
+
+    class FakeRegistry:
+        def get(self, name: str) -> object | None:
+            return {
+                "target_trace": FakeTargetTraceTool(),
+                "source_read": FakeSourceReadTool(),
+            }.get(name)
+
+    monkeypatch.setattr(nodes, "load_tool_registry", lambda: FakeRegistry())
+    state: AgenticRagState = {
+        "thread_id": "thread-1",
+        "project_path": "F:/demo",
+        "project_id": "project-1",
+        "question": "oms_order_operate_history table source",
+        "top_k": 8,
+        "graph_depth": 2,
+        "source_available": True,
+        "runtime_config": _config(max_history_messages=6, max_history_chars=4000),
+        "retrieval_plan": {
+            "steps": [
+                {
+                    "tool_name": "target_trace",
+                    "query": "oms_order_operate_history table source",
+                    "filters": {"intent": "persistence_location"},
+                }
+            ]
+        },
+        "question_understanding": {"intent": "persistence_location"},
+        "tool_results": [],
+        "used_tools": [],
+        "observations": [],
+        "evidence": [],
+        "source_snippets": [],
+        "warnings": [],
+    }
+
+    result = nodes.execute_retrieval_plan(state)
+
+    assert calls == ["target_trace", "source_read"]
+    assert result["used_tools"] == ["target_trace", "source_read"]
+    assert result["source_snippets"][0].content == (
+        "interface OrderOperateHistoryDao"
+    )
+    assert result.get("source_reading_skipped_reason") is None
 
 
 def _config(

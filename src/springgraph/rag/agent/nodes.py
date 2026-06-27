@@ -9,6 +9,7 @@ from springgraph.rag.config.loader import load_agentic_rag_config
 from springgraph.rag.llm import invoke_agent_model
 from springgraph.rag.memory.store import get_thread, update_thread
 from springgraph.rag.schemas import RagEvidence, SourceSnippet
+from springgraph.rag.target_trace import source_priority
 from springgraph.rag.tools.registry import load_tool_registry
 from springgraph.rag.tools.schemas import ToolInput
 
@@ -68,7 +69,7 @@ def load_thread_memory(state: AgenticRagState) -> AgenticRagState:
     )
     if memory.last_question is not None:
         state["observations"].append(
-            f"Thread memory last question: {memory.last_question}"
+            "Thread memory is available for follow-up context."
         )
     return state
 
@@ -134,6 +135,37 @@ def execute_retrieval_plan(state: AgenticRagState) -> AgenticRagState:
                 result.warnings
             )
 
+    if not executed_source_read and _should_auto_source_read(state):
+        tool = registry.get("source_read")
+        if tool is not None:
+            step: PlanStep = {
+                "tool_name": "source_read",
+                "query": state["question"],
+                "filters": {"trigger": "auto_target_trace"},
+                "reason": "Read source for resolved target trace evidence.",
+            }
+            result = tool.invoke(
+                _tool_input(
+                    state,
+                    step,
+                    evidence=_prioritized_source_evidence(state.get("evidence", [])),
+                )
+            )
+            state["tool_results"].append(result)
+            state["used_tools"].append(result.tool_name)
+            state["observations"].append(
+                f"Auto source_read after target_trace: {result.summary}"
+            )
+            state["warnings"] = [*state.get("warnings", []), *result.warnings]
+            state["source_snippets"] = _dedupe_source_snippets(
+                [*state.get("source_snippets", []), *result.source_snippets]
+            )
+            executed_source_read = True
+            if not result.source_snippets:
+                state["source_reading_skipped_reason"] = _source_skip_reason(
+                    result.warnings
+                )
+
     if "source_read" not in state.get("used_tools", []):
         state["source_reading_skipped_reason"] = "not_requested_by_retrieval_plan"
     return state
@@ -171,7 +203,11 @@ def persist_turn_memory(state: AgenticRagState) -> AgenticRagState:
     return state
 
 
-def _tool_input(state: AgenticRagState, step: PlanStep) -> ToolInput:
+def _tool_input(
+    state: AgenticRagState,
+    step: PlanStep,
+    evidence: list[RagEvidence] | None = None,
+) -> ToolInput:
     return ToolInput(
         query=step.get("query", state["question"]),
         filters=step.get("filters", {}),
@@ -183,7 +219,7 @@ def _tool_input(state: AgenticRagState, step: PlanStep) -> ToolInput:
         max_source_files=state["runtime_config"].source_reading.max_files,
         max_source_lines=state["runtime_config"].source_reading.max_lines_per_file,
         source_line_padding=state["runtime_config"].source_reading.line_padding,
-        evidence=state.get("evidence", []),
+        evidence=evidence if evidence is not None else state.get("evidence", []),
         thread_id=state.get("thread_id"),
     )
 
@@ -197,6 +233,45 @@ def _source_skip_reason(warnings: list[str]) -> str:
         if warning.startswith("source_read skipped:"):
             return warning.removeprefix("source_read skipped:").strip()
     return "source_read_returned_no_snippets"
+
+
+def _should_auto_source_read(state: AgenticRagState) -> bool:
+    if not state.get("source_available", False):
+        return False
+    evidence = state.get("evidence", [])
+    if not _has_file_evidence(evidence):
+        return False
+    if "target_trace" in state.get("used_tools", []):
+        return True
+    intent = state.get("question_understanding", {}).get("intent")
+    return intent == "persistence_location" and any(
+        _is_trace_evidence(item) for item in evidence
+    )
+
+
+def _is_trace_evidence(item: RagEvidence) -> bool:
+    if item.source == "target_trace":
+        return True
+    if item.evidence_type.startswith("target_relation:"):
+        return True
+    return item.evidence_type in {
+        "edge:writes_table",
+        "table_write",
+        "table_mapping",
+        "target_match",
+    }
+
+
+def _prioritized_source_evidence(evidence: list[RagEvidence]) -> list[RagEvidence]:
+    return sorted(
+        evidence,
+        key=lambda item: (
+            source_priority(item.evidence_type),
+            item.file_path or "",
+            item.start_line or 0,
+            item.symbol or "",
+        ),
+    )
 
 
 def _bounded_conversation_history(

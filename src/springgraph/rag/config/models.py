@@ -82,3 +82,17 @@ class IntentConfig:
     default_filters: dict[str, object] = field(default_factory=dict)
     chinese_terms: list[str] = field(default_factory=list)
     english_terms: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TargetTraceConfig:
+    """Target tracing heuristics and relation defaults."""
+
+    min_target_length: int = 3
+    default_source_priority: int = 40
+    generic_terms: list[str] = field(default_factory=list)
+    class_suffixes: list[str] = field(default_factory=list)
+    symbolic_chars: list[str] = field(default_factory=list)
+    persistence_edge_kinds: list[str] = field(default_factory=list)
+    table_target_kinds: list[str] = field(default_factory=list)
+    source_priorities: dict[str, int] = field(default_factory=dict)

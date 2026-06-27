@@ -1,0 +1,53 @@
+target_trace:
+  min_target_length: 3
+  default_source_priority: 40
+
+  generic_terms:
+    - api
+    - class
+    - config
+    - controller
+    - dao
+    - data
+    - database
+    - entity
+    - feign
+    - from
+    - interface
+    - java
+    - mapper
+    - method
+    - route
+    - service
+    - table
+    - where
+
+  class_suffixes:
+    - Entity
+    - Service
+    - ServiceImpl
+    - Dao
+    - Mapper
+
+  symbolic_chars:
+    - "_"
+    - "."
+    - ":"
+    - "/"
+    - "-"
+
+  persistence_edge_kinds:
+    - writes_table
+    - defines_contract
+
+  table_target_kinds:
+    - db_table
+    - data_contract
+
+  source_priorities:
+    target_relation:writes_table: 0
+    edge:writes_table: 0
+    target_relation:defines_contract: 1
+    edge:defines_contract: 1
+    target_match: 2
+    table_usage: 3

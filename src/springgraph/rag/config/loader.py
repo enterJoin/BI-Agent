@@ -14,6 +14,7 @@ from springgraph.rag.config.models import (
     RetrievalConfig,
     SafetyConfig,
     SourceReadingConfig,
+    TargetTraceConfig,
     ToolConfig,
 )
 
@@ -82,6 +83,28 @@ def load_intent_configs() -> dict[str, IntentConfig]:
     return intents
 
 
+@lru_cache(maxsize=1)
+def load_target_trace_config() -> TargetTraceConfig:
+    """Load target trace heuristics and defaults."""
+    data = _load_yaml(_config_path("target_trace.yml"))
+    raw_config = _mapping(data.get("target_trace"))
+    return TargetTraceConfig(
+        min_target_length=_int_value(raw_config.get("min_target_length"), 3),
+        default_source_priority=_int_value(
+            raw_config.get("default_source_priority"),
+            40,
+        ),
+        generic_terms=_string_list(raw_config.get("generic_terms")),
+        class_suffixes=_string_list(raw_config.get("class_suffixes")),
+        symbolic_chars=_string_list(raw_config.get("symbolic_chars")),
+        persistence_edge_kinds=_string_list(
+            raw_config.get("persistence_edge_kinds")
+        ),
+        table_target_kinds=_string_list(raw_config.get("table_target_kinds")),
+        source_priorities=_int_mapping(raw_config.get("source_priorities")),
+    )
+
+
 def _config_path(name: str) -> Path:
     return Path(__file__).resolve().parents[4] / "config" / "rag" / name
 
@@ -104,3 +127,22 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _int_mapping(value: object) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, int] = {}
+    for raw_key, raw_value in value.items():
+        try:
+            result[str(raw_key)] = int(raw_value)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _int_value(value: object, fallback: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback

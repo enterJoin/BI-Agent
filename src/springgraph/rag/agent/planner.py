@@ -14,6 +14,10 @@ from springgraph.rag.intent import infer_query_intent, intent_default_filters
 from springgraph.rag.llm import invoke_agent_model
 from springgraph.rag.prompts.loader import load_prompt
 from springgraph.rag.schemas import RagEvidence, SourceSnippet
+from springgraph.rag.target_trace import (
+    explicit_trace_target,
+    persistence_edge_kinds,
+)
 
 
 def plan_question_retrieval(
@@ -125,6 +129,18 @@ def _apply_step_intent_defaults(
         **filters,
         "intent": intent,
     }
+    trace_target = explicit_trace_target(step.get("query", ""))
+    if intent == "persistence_location" and trace_target is not None:
+        return {
+            **step,
+            "tool_name": "target_trace",
+            "filters": {
+                **merged_filters,
+                "target": trace_target,
+                "direction": "incoming",
+                "edge_kinds": persistence_edge_kinds(),
+            },
+        }
     return {**step, "filters": merged_filters}
 
 
@@ -141,14 +157,14 @@ def build_final_prompt(
     return "\n\n".join(
         [
             load_prompt("final_answer.md"),
-            "Conversation history:\n"
-            f"{_conversation_history_summary(conversation_history)}",
-            f"Question:\n{question}",
+            f"Current question:\n{question}",
             f"Question understanding:\n{json.dumps(understanding, ensure_ascii=False)}",
             f"Tool observations:\n{json.dumps(observations, ensure_ascii=False)}",
             f"Evidence:\n{_evidence_summary(evidence)}",
             f"Source snippets:\n{_snippet_summary(source_snippets)}",
             f"Source reading skipped reason: {source_reading_skipped_reason}",
+            "Conversation history for reference only:\n"
+            f"{_conversation_history_summary(conversation_history)}",
         ]
     )
 

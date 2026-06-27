@@ -32,6 +32,17 @@ tools:
     requires:
       - project_id
 
+  - name: target_trace
+    description: "Resolve an explicit target such as a table, method, route, external API, config key, message topic, or cache key, then trace incoming or outgoing usage relations."
+    capabilities:
+      - target_resolution
+      - usage_trace
+      - persistence_trace
+      - callsite_lookup
+      - source_seed_generation
+    requires:
+      - project_id
+
   - name: source_read
     description: "在项目路径存在且允许读取源码时，读取证据对应的源码片段。"
     capabilities:

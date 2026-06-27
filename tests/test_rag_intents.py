@@ -1,7 +1,11 @@
 from springgraph.rag.agent.planner import apply_intent_defaults
 from springgraph.rag.agent.state import QuestionUnderstanding, RetrievalPlan
-from springgraph.rag.config.loader import load_intent_configs
+from springgraph.rag.config.loader import (
+    load_intent_configs,
+    load_target_trace_config,
+)
 from springgraph.rag.intent import infer_query_intent, intent_default_filters
+from springgraph.rag.target_trace import trace_target_tokens
 
 
 def test_load_intent_configs_includes_persistence_defaults() -> None:
@@ -13,6 +17,19 @@ def test_load_intent_configs_includes_persistence_defaults() -> None:
     assert persistence.default_filters == {"group_by": "table_name"}
     assert "\u5b58\u5165" in persistence.chinese_terms
     assert "save" in persistence.english_terms
+
+
+def test_target_trace_heuristics_are_config_driven() -> None:
+    config = load_target_trace_config()
+
+    assert "table" in config.generic_terms
+    assert "ServiceImpl" in config.class_suffixes
+    assert trace_target_tokens("api table where oms_order_operate_history") == [
+        "oms_order_operate_history"
+    ]
+    assert trace_target_tokens("OrderOperateHistoryServiceImpl") == [
+        "OrderOperateHistoryServiceImpl"
+    ]
 
 
 def test_infer_query_intent_uses_configured_terms() -> None:
@@ -81,4 +98,35 @@ def test_apply_intent_defaults_adds_aggregate_filters() -> None:
     assert updated["steps"][0]["filters"] == {
         "group_by": "table_name",
         "intent": "persistence_location",
+    }
+
+
+def test_apply_intent_defaults_promotes_explicit_target_to_trace() -> None:
+    intents = load_intent_configs()
+    query = "oms_order_operate_history table data source"
+    understanding: QuestionUnderstanding = {
+        "task_goal": "trace persistence target",
+        "intent": "persistence_location",
+    }
+    plan: RetrievalPlan = {
+        "task_goal": "trace persistence target",
+        "steps": [
+            {
+                "tool_name": "aggregate_query",
+                "query": query,
+                "filters": {},
+            }
+        ],
+    }
+
+    updated = apply_intent_defaults(plan, understanding, intents)
+
+    step = updated["steps"][0]
+    assert step["tool_name"] == "target_trace"
+    assert step["filters"] == {
+        "group_by": "table_name",
+        "intent": "persistence_location",
+        "target": "oms_order_operate_history",
+        "direction": "incoming",
+        "edge_kinds": ["writes_table", "defines_contract"],
     }
