@@ -11,6 +11,9 @@ from pydantic import BaseModel, Field, ValidationError
 
 from springgraph.config import get_settings
 from springgraph.logging_config import configure_logging
+from springgraph.rag.llm import LlmConfigurationError, LlmInvocationError
+from springgraph.rag.schemas import RagAnswer, RagRequest
+from springgraph.rag.service import RagRequestError, ask_project
 from springgraph.refinement import refine_project
 from springgraph.vector_search import (
     VectorSearchError,
@@ -78,6 +81,65 @@ class VectorSearchResponse(BaseModel):
     embedding_model: str
     embedding_dim: int
     matches: list[VectorSearchMatchResponse]
+
+
+class RagAskRequest(BaseModel):
+    """Request body for RAG question answering."""
+
+    question: str = Field(..., min_length=1)
+    project_id: str | None = None
+    project_path: str | None = None
+    thread_id: str | None = None
+    user_id: str | None = None
+    top_k: int = Field(default=8, ge=1, le=50)
+    graph_depth: int = Field(default=2, ge=0, le=3)
+    read_source: bool = True
+    mode: str = "agentic"
+
+
+class RagEvidenceResponse(BaseModel):
+    """One evidence item returned by RAG."""
+
+    evidence_type: str
+    source: str
+    file_path: str | None = None
+    start_line: int | None = None
+    end_line: int | None = None
+    symbol: str | None = None
+    score: float
+    content_excerpt: str | None = None
+    metadata: dict[str, Any]
+
+
+class SourceSnippetResponse(BaseModel):
+    """One source snippet returned by RAG."""
+
+    file_path: str
+    start_line: int
+    end_line: int
+    content: str
+
+
+class RagAskResponse(BaseModel):
+    """Response returned by RAG question answering."""
+
+    answer: str
+    thread_id: str
+    project_id: str
+    project_path: str
+    intent: str
+    rewritten_query: str
+    expanded_queries: list[str]
+    used_vector_search: bool
+    used_relational_search: bool
+    used_source_reading: bool
+    source_reading_skipped_reason: str | None
+    evidence: list[RagEvidenceResponse]
+    source_snippets: list[SourceSnippetResponse]
+    warnings: list[str]
+    mode: str = "agentic"
+    used_tools: list[str] = Field(default_factory=list)
+    observations: list[str] = Field(default_factory=list)
 
 
 def create_app() -> FastAPI:
@@ -155,6 +217,35 @@ def create_app() -> FastAPI:
             matches=[_match_response(match) for match in result.matches],
         )
 
+    @app.post("/api/rag/ask", response_model=RagAskResponse)
+    def rag_ask_endpoint(request: RagAskRequest) -> RagAskResponse:
+        try:
+            result = ask_project(
+                request=RagRequest(
+                    question=request.question,
+                    project_id=request.project_id,
+                    project_path=request.project_path,
+                    thread_id=request.thread_id,
+                    user_id=request.user_id,
+                    top_k=request.top_k,
+                    graph_depth=request.graph_depth,
+                    read_source=request.read_source,
+                    mode=request.mode,
+                )
+            )
+        except RagRequestError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except LlmConfigurationError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except LlmInvocationError as exc:
+            logger.exception("RAG LLM invocation failed.")
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("RAG ask failed for question: %s", request.question)
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        return _rag_response(result)
+
     return app
 
 
@@ -182,6 +273,33 @@ def _validated_project_path(raw_path: str) -> Path:
 
 def _match_response(match: VectorSearchMatch) -> VectorSearchMatchResponse:
     return VectorSearchMatchResponse(**asdict(match))
+
+
+def _rag_response(answer: RagAnswer) -> RagAskResponse:
+    return RagAskResponse(
+        answer=answer.answer,
+        thread_id=answer.thread_id,
+        project_id=answer.project_id,
+        project_path=answer.project_path,
+        intent=answer.intent,
+        rewritten_query=answer.rewritten_query,
+        expanded_queries=answer.expanded_queries,
+        used_vector_search=answer.used_vector_search,
+        used_relational_search=answer.used_relational_search,
+        used_source_reading=answer.used_source_reading,
+        source_reading_skipped_reason=answer.source_reading_skipped_reason,
+        evidence=[
+            RagEvidenceResponse(**asdict(item)) for item in answer.evidence
+        ],
+        source_snippets=[
+            SourceSnippetResponse(**asdict(item))
+            for item in answer.source_snippets
+        ],
+        warnings=answer.warnings,
+        mode=answer.mode,
+        used_tools=answer.used_tools,
+        observations=answer.observations,
+    )
 
 
 def _parse_vector_search_request(raw_body: bytes) -> VectorSearchRequest:

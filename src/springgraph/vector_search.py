@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from math import sqrt
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -67,7 +67,10 @@ def search_project_vectors(
 
     normalized_limit = _normalize_limit(limit)
     embedder = create_embedder()
-    query_embedding = embedder.embed(normalized_query)
+    try:
+        query_embedding = embedder.embed(normalized_query)
+    except RuntimeError as exc:
+        raise VectorSearchError(str(exc)) from exc
     resolved_project_id = _resolve_project_id(project_id_value, project_path)
 
     with session_scope() as session:
@@ -186,7 +189,7 @@ def _search_with_pgvector(
         ),
         params,
     ).mappings()
-    return [_match_from_row(row) for row in rows]
+    return [_match_from_row(cast(Mapping[str, Any], row)) for row in rows]
 
 
 def _search_with_python_fallback(
@@ -246,7 +249,7 @@ def _search_with_python_fallback(
     for row in rows:
         embedding = _parse_vector(str(row["embedding_text"]))
         similarity = _cosine_similarity(query_embedding, embedding)
-        scored_rows.append((similarity, row))
+        scored_rows.append((similarity, cast(Mapping[str, Any], row)))
 
     scored_rows.sort(key=lambda item: item[0], reverse=True)
     return [
@@ -328,7 +331,13 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
 def _optional_int(value: object) -> int | None:
     if value is None:
         return None
-    return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        return int(value)
+    raise TypeError(f"Value cannot be converted to int: {value!r}")
 
 
 def _optional_str(value: object) -> str | None:

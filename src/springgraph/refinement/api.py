@@ -17,6 +17,8 @@ from springgraph.refinement._scanner import scan_refinement_files
 from springgraph.refinement._types import EdgeFact, RefinementFacts, RefinementResult
 from springgraph.refinement.relational.indexer import index_project
 
+__all__ = ["RefinementResult", "refine_project"]
+
 
 def refine_project(
     project_path: str | Path,

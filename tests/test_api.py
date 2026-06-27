@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from springgraph import api
+from springgraph.rag.schemas import RagAnswer, RagEvidence, SourceSnippet
 from springgraph.refinement._types import RefinementResult
 from springgraph.vector_search import VectorSearchMatch, VectorSearchResult
 
@@ -200,3 +201,171 @@ def test_vector_search_endpoint_accepts_json_string_body(
 
     assert response.status_code == 200
     assert response.json()["project_id"] == "project-1"
+
+
+def test_rag_ask_endpoint_uses_request_defaults(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_ask_project(request: object) -> RagAnswer:
+        captured["request"] = request
+        return RagAnswer(
+            answer="问题意图识别为 route_lookup。",
+            thread_id="thread-1",
+            project_id="project-1",
+            project_path=str(tmp_path),
+            intent="route_lookup",
+            rewritten_query="订单创建接口",
+            expanded_queries=["订单创建接口"],
+            used_vector_search=True,
+            used_relational_search=True,
+            used_source_reading=True,
+            source_reading_skipped_reason=None,
+            evidence=[
+                RagEvidence(
+                    evidence_type="route",
+                    source="relational",
+                    file_path="src/main/java/OrderController.java",
+                    start_line=10,
+                    end_line=20,
+                    symbol="OrderController.create",
+                    score=1.0,
+                    content_excerpt="@PostMapping",
+                    metadata={"kind": "route"},
+                )
+            ],
+            source_snippets=[
+                SourceSnippet(
+                    file_path="src/main/java/OrderController.java",
+                    start_line=10,
+                    end_line=20,
+                    content="@PostMapping",
+                )
+            ],
+            warnings=[],
+        )
+
+    monkeypatch.setattr(api, "ask_project", fake_ask_project)
+
+    client = TestClient(api.app)
+    response = client.post(
+        "/api/rag/ask",
+        json={
+            "question": "订单创建接口在哪里实现",
+            "project_path": str(tmp_path),
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["intent"] == "route_lookup"
+    assert payload["evidence"][0]["file_path"] == "src/main/java/OrderController.java"
+    request = captured["request"]
+    assert request.top_k == 8  # type: ignore[attr-defined]
+    assert request.graph_depth == 2  # type: ignore[attr-defined]
+    assert request.read_source is True  # type: ignore[attr-defined]
+
+
+def test_rag_ask_endpoint_accepts_project_id(
+    monkeypatch: object,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_ask_project(request: object) -> RagAnswer:
+        captured["request"] = request
+        return RagAnswer(
+            answer="命中项目。",
+            thread_id="thread-1",
+            project_id="project-1",
+            project_path="F:\\demo",
+            intent="semantic_qna",
+            rewritten_query="项目",
+            expanded_queries=["项目"],
+            used_vector_search=True,
+            used_relational_search=True,
+            used_source_reading=False,
+            source_reading_skipped_reason="project_path_not_found",
+            evidence=[],
+            source_snippets=[],
+            warnings=[],
+        )
+
+    monkeypatch.setattr(api, "ask_project", fake_ask_project)
+
+    client = TestClient(api.app)
+    response = client.post(
+        "/api/rag/ask",
+        json={
+            "question": "这个项目有哪些接口？",
+            "project_id": "project-1",
+            "project_path": "F:\\should-be-ignored-by-service",
+        },
+    )
+
+    assert response.status_code == 200
+    request = captured["request"]
+    assert request.project_id == "project-1"  # type: ignore[attr-defined]
+    assert request.project_path == "F:\\should-be-ignored-by-service"  # type: ignore[attr-defined]
+
+
+def test_rag_ask_endpoint_accepts_agentic_mode(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_ask_project(request: object) -> RagAnswer:
+        captured["request"] = request
+        return RagAnswer(
+            answer="agentic",
+            thread_id="thread-1",
+            project_id="project-1",
+            project_path=str(tmp_path),
+            intent="追踪数据入库链路",
+            rewritten_query="素材怎么入库",
+            expanded_queries=["素材怎么入库"],
+            used_vector_search=True,
+            used_relational_search=True,
+            used_source_reading=False,
+            source_reading_skipped_reason="project_path_not_found",
+            evidence=[],
+            source_snippets=[],
+            warnings=[],
+            mode="agentic",
+            used_tools=["vector_search"],
+            observations=["Vector search returned 0 evidence items."],
+        )
+
+    monkeypatch.setattr(api, "ask_project", fake_ask_project)
+
+    client = TestClient(api.app)
+    response = client.post(
+        "/api/rag/ask",
+        json={
+            "question": "素材怎么入库",
+            "project_path": str(tmp_path),
+            "mode": "agentic",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mode"] == "agentic"
+    assert payload["used_tools"] == ["vector_search"]
+    request = captured["request"]
+    assert request.mode == "agentic"  # type: ignore[attr-defined]
+
+
+def test_rag_ask_endpoint_requires_project_identifier() -> None:
+    client = TestClient(api.app)
+    response = client.post(
+        "/api/rag/ask",
+        json={"question": "这个项目有哪些接口？"},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": "project_id or project_path is required."
+    }

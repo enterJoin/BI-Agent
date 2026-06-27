@@ -68,7 +68,7 @@ class OpenAICompatibleEmbedder:
             "dimensions": self.dimensions,
         }
         request = Request(
-            f"{self.base_url}/embeddings",
+            self._endpoint_url(),
             data=json.dumps(body).encode("utf-8"),
             headers=self._headers(),
             method="POST",
@@ -101,6 +101,11 @@ class OpenAICompatibleEmbedder:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
+    def _endpoint_url(self) -> str:
+        if self.base_url.endswith("/embeddings"):
+            return self.base_url
+        return f"{self.base_url}/embeddings"
+
 
 def create_embedder(settings: Settings | None = None) -> Embedder:
     """Create the configured embedding provider."""
@@ -108,7 +113,13 @@ def create_embedder(settings: Settings | None = None) -> Embedder:
     provider = resolved.embedding_provider.strip().lower()
     if provider in {"local", "hash", "local_hash"}:
         return HashEmbedder(dimensions=resolved.embedding_dim)
-    if provider in {"openai", "openai_compatible", "compatible"}:
+    if provider in {
+        "openai",
+        "openai_compatible",
+        "openai-compatible",
+        "compatible",
+        "apirouter",
+    }:
         return OpenAICompatibleEmbedder(
             base_url=resolved.embedding_base_url,
             api_key=resolved.embedding_api_key,

@@ -5,6 +5,9 @@ description = "Parse Java Spring Boot projects into a PostgreSQL-backed code gra
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115",
+  "langchain>=1.2,<2.0",
+  "langchain-openai>=1.2,<2.0",
+  "langgraph>=1.1,<2.0",
   "uvicorn>=0.30",
   "typer>=0.12",
   "pydantic-settings>=2.0",

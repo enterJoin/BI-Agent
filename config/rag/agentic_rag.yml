@@ -1,0 +1,31 @@
+agent:
+  loop:
+    max_iterations: 6
+    max_tool_calls: 10
+    stop_when_no_new_evidence_rounds: 2
+
+  retrieval:
+    default_top_k: 8
+    max_top_k: 50
+    default_graph_depth: 2
+    max_graph_depth: 3
+    top_candidate_tools: 7
+
+  source_reading:
+    enabled_by_default: true
+    max_files: 8
+    max_lines_per_file: 80
+    line_padding: 3
+
+  context:
+    max_evidence_items: 30
+    max_source_snippets: 8
+
+  memory:
+    short_term_enabled: true
+    long_term_enabled: false
+
+  safety:
+    require_evidence_citation: true
+    allow_shell_execution: false
+    allow_code_modification: false

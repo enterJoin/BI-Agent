@@ -1,0 +1,63 @@
+tools:
+  - name: vector_search
+    description: "根据自然语言、业务词、代码词召回语义相关的代码块、文档块和项目 library 知识。"
+    capabilities:
+      - semantic_retrieval
+      - code_chunk_retrieval
+      - library_retrieval
+    requires:
+      - project_id
+
+  - name: relational_search
+    description: "查询关系型数据库中的文件、符号、边、路由、资源等结构化代码索引。"
+    capabilities:
+      - symbol_lookup
+      - file_lookup
+      - relation_lookup
+      - route_lookup
+      - resource_lookup
+    requires:
+      - project_id
+
+  - name: call_graph_search
+    description: "围绕类、方法、符号做调用方、被调用方、上下游调用关系和影响范围查询。"
+    capabilities:
+      - caller_lookup
+      - callee_lookup
+      - impact_trace
+    requires:
+      - project_id
+
+  - name: db_mapping_search
+    description: "查数据库表、字段、Entity、Mapper、Repository、XML SQL、insert、update、save 等入库相关证据。"
+    capabilities:
+      - table_lookup
+      - mapper_lookup
+      - sql_lookup
+      - persistence_trace
+    requires:
+      - project_id
+
+  - name: config_search
+    description: "查 yml、properties、枚举、常量、渠道码、外部资源配置和业务开关。"
+    capabilities:
+      - config_lookup
+      - enum_lookup
+      - resource_lookup
+    requires:
+      - project_id
+
+  - name: source_reader
+    description: "在项目路径存在且允许读取源码时，读取证据对应的源码片段。"
+    capabilities:
+      - source_reading
+    requires:
+      - project_path
+      - source_available
+
+  - name: memory_search
+    description: "检索当前 thread 中与问题相关的短期会话记忆。"
+    capabilities:
+      - short_term_memory
+    requires:
+      - thread_id
