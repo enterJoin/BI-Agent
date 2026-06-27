@@ -96,6 +96,52 @@ def test_generate_final_answer_includes_conversation_history(
     assert "Evidence:" in captured["prompt"]
 
 
+def test_generate_final_answer_includes_task_planning_guidance(
+    monkeypatch: object,
+) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_invoke_agent_model(prompt: str) -> str:
+        captured["prompt"] = prompt
+        return "plan"
+
+    monkeypatch.setattr(nodes, "invoke_agent_model", fake_invoke_agent_model)
+    state: AgenticRagState = {
+        "question": (
+            "\u6211\u8981\u7ed9\u4f1a\u5458\u8868\u65b0\u589e\u751f\u65e5"
+            "\u5b57\u6bb5\uff0c\u5e2e\u6211\u89c4\u5212\u600e\u4e48\u6539"
+        ),
+        "question_understanding": {
+            "task_goal": "plan member birthday change",
+            "intent": "task_planning",
+        },
+        "runtime_config": _config(max_history_messages=6, max_history_chars=4000),
+        "evidence": [
+            RagEvidence(
+                evidence_type="table_usage",
+                source="aggregate",
+                file_path="MemberDao.java",
+                start_line=15,
+                end_line=15,
+                symbol="db_table:member",
+                content_excerpt="table=member; artifact=MemberDao",
+            )
+        ],
+        "source_snippets": [],
+        "observations": [],
+        "conversation_history": [],
+        "source_reading_skipped_reason": "not_requested_by_retrieval_plan",
+    }
+
+    result = nodes.generate_final_answer(state)
+
+    assert result["answer"] == "plan"
+    assert "Task planning answer sections:" in captured["prompt"]
+    assert "\u4efb\u52a1\u7406\u89e3" in captured["prompt"]
+    assert "Prefer adding a column when:" in captured["prompt"]
+    assert "Prefer creating a new table when:" in captured["prompt"]
+
+
 def test_execute_retrieval_plan_auto_reads_target_trace_source(
     monkeypatch: object,
 ) -> None:
@@ -184,6 +230,70 @@ def test_execute_retrieval_plan_auto_reads_target_trace_source(
         "interface OrderOperateHistoryDao"
     )
     assert result.get("source_reading_skipped_reason") is None
+
+
+def test_task_planning_source_read_prioritizes_table_evidence(
+    monkeypatch: object,
+) -> None:
+    calls: list[str] = []
+
+    class FakeSourceReadTool:
+        def invoke(self, tool_input: ToolInput) -> ToolResult:
+            calls.append("source_read")
+            assert tool_input.evidence[0].evidence_type == "table_usage"
+            return ToolResult(tool_name="source_read", summary="source read")
+
+    class FakeRegistry:
+        def get(self, name: str) -> object | None:
+            if name == "source_read":
+                return FakeSourceReadTool()
+            return None
+
+    monkeypatch.setattr(nodes, "load_tool_registry", lambda: FakeRegistry())
+    state: AgenticRagState = {
+        "thread_id": "thread-1",
+        "project_path": "F:/demo",
+        "project_id": "project-1",
+        "question": "plan change",
+        "top_k": 8,
+        "graph_depth": 2,
+        "source_available": True,
+        "runtime_config": _config(max_history_messages=6, max_history_chars=4000),
+        "retrieval_plan": {
+            "steps": [
+                {
+                    "tool_name": "source_read",
+                    "query": "plan change",
+                    "filters": {"intent": "task_planning"},
+                }
+            ]
+        },
+        "question_understanding": {"intent": "task_planning"},
+        "tool_results": [],
+        "used_tools": [],
+        "observations": [],
+        "evidence": [
+            RagEvidence(
+                evidence_type="artifact",
+                source="relational",
+                file_path="Controller.java",
+                symbol="class:MemberController",
+            ),
+            RagEvidence(
+                evidence_type="table_usage",
+                source="aggregate",
+                file_path="MemberDao.java",
+                symbol="db_table:member",
+            ),
+        ],
+        "source_snippets": [],
+        "warnings": [],
+    }
+
+    result = nodes.execute_retrieval_plan(state)
+
+    assert calls == ["source_read"]
+    assert result["used_tools"] == ["source_read"]
 
 
 def _config(

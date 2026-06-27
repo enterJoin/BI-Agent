@@ -10,6 +10,7 @@ from springgraph.rag.llm import invoke_agent_model
 from springgraph.rag.memory.store import get_thread, update_thread
 from springgraph.rag.schemas import RagEvidence, SourceSnippet
 from springgraph.rag.target_trace import source_priority
+from springgraph.rag.task_planning import task_planning_source_priority
 from springgraph.rag.tools.registry import load_tool_registry
 from springgraph.rag.tools.schemas import ToolInput
 
@@ -119,7 +120,8 @@ def execute_retrieval_plan(state: AgenticRagState) -> AgenticRagState:
         if tool is None:
             state["warnings"].append(f"Unknown planned tool skipped: {tool_name}")
             continue
-        result = tool.invoke(_tool_input(state, step))
+        evidence = _source_read_evidence_for_step(state, tool_name)
+        result = tool.invoke(_tool_input(state, step, evidence=evidence))
         state["tool_results"].append(result)
         state["used_tools"].append(result.tool_name)
         state["observations"].append(result.summary)
@@ -224,6 +226,18 @@ def _tool_input(
     )
 
 
+def _source_read_evidence_for_step(
+    state: AgenticRagState,
+    tool_name: str,
+) -> list[RagEvidence] | None:
+    if tool_name != "source_read":
+        return None
+    intent = state.get("question_understanding", {}).get("intent")
+    if intent != "task_planning":
+        return None
+    return _prioritized_task_planning_source_evidence(state.get("evidence", []))
+
+
 def _has_file_evidence(evidence: list[RagEvidence]) -> bool:
     return any(item.file_path for item in evidence)
 
@@ -272,6 +286,20 @@ def _prioritized_source_evidence(evidence: list[RagEvidence]) -> list[RagEvidenc
             item.symbol or "",
         ),
     )
+
+
+def _prioritized_task_planning_source_evidence(
+    evidence: list[RagEvidence],
+) -> list[RagEvidence]:
+    indexed = list(enumerate(evidence))
+    ranked = sorted(
+        indexed,
+        key=lambda item: (
+            task_planning_source_priority(item[1].evidence_type),
+            item[0],
+        ),
+    )
+    return [item for _, item in ranked]
 
 
 def _bounded_conversation_history(

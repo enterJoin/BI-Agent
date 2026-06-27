@@ -1,6 +1,10 @@
 """Query intent inference for Agentic RAG retrieval."""
 
 from springgraph.rag.config.models import IntentConfig
+from springgraph.rag.task_planning import (
+    looks_like_task_planning,
+    task_planning_intent_name,
+)
 
 TABLE_RETRIEVAL_INTENTS = frozenset({"persistence_location", "table_usage"})
 
@@ -17,6 +21,10 @@ def infer_query_intent(
         return normalized_intent
     if _normalize(group_by) == "table_name":
         return "table_usage"
+    if task_planning_intent_name() in intent_configs and looks_like_task_planning(
+        query
+    ):
+        return task_planning_intent_name()
 
     lowered_query = query.lower()
     for intent_name, config in intent_configs.items():

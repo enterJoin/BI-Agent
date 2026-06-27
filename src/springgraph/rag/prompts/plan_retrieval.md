@@ -9,7 +9,7 @@ Return this exact shape:
 {
   "question_understanding": {
     "task_goal": "short open-ended goal label",
-    "intent": "one of: persistence_location, table_usage, api_entrypoint, execution_flow, config_lookup, business_qna, unknown",
+    "intent": "one of: persistence_location, table_usage, api_entrypoint, execution_flow, task_planning, config_lookup, business_qna, unknown",
     "sub_questions": ["what needs to be verified"],
     "business_terms": ["domain terms from the question"],
     "technical_terms": ["class/method/table/config/API terms if present"],
@@ -64,6 +64,11 @@ Intent guidance:
   handlers, or external entrypoints.
 - execution_flow: the user asks about call flow, processing stages, or how a
   feature executes.
+- task_planning: the user asks how to add, modify, implement, refactor, or plan
+  a development task based on the current project. Chinese examples include
+  帮我规划, 实现方案, 改造方案, 需要改哪些, 影响范围, 基于现有,
+  怎么改, 如何改, 加字段, 新增字段. Prefer a multi-tool plan that finds
+  current code evidence before recommending changes.
 
 For questions asking where data is stored, saved, persisted, inserted, written,
 landed, or 入库/存入/保存/写入/落库/持久化, prefer:
@@ -92,6 +97,19 @@ For execution flow questions, prefer:
 2. relation_search with depth.
 3. aggregate_query to group stages and persistence points.
 4. source_read when exact source details are needed.
+
+For task planning questions, prefer:
+1. artifact_search to find existing controllers, routes, services, methods,
+   DTO/VO classes, entities, mappers, configs, and module entrypoints related to
+   the requested change.
+2. relation_search to trace calls and dependencies around matched evidence.
+3. aggregate_query with filters.intent=table_usage and group_by=table_name to
+   collect related tables, entities, mappers, and persistence artifacts.
+4. source_read when source reading is allowed, so the final plan can name exact
+   classes, methods, interfaces, and tables with evidence.
+For schema-like planning such as adding a field or deciding whether to create a
+new table, require evidence about existing tables/entities/mappers before making
+the recommendation.
 
 For annotation-driven entrypoint questions, such as scheduled jobs, message
 listeners, framework callbacks, or questions that mention an annotation value,

@@ -18,6 +18,13 @@ from springgraph.rag.target_trace import (
     explicit_trace_target,
     persistence_edge_kinds,
 )
+from springgraph.rag.task_planning import (
+    looks_like_task_planning,
+    task_planning_default_steps,
+    task_planning_intent_name,
+    task_planning_prompt_guidance,
+    task_planning_tool_order,
+)
 
 
 def plan_question_retrieval(
@@ -45,8 +52,16 @@ def plan_question_retrieval(
     if not isinstance(plan_payload, dict):
         plan_payload = {}
     understanding = _normalize_understanding(understanding_payload, question)
+    if looks_like_task_planning(question):
+        understanding["intent"] = task_planning_intent_name()
     plan = _normalize_plan(plan_payload, understanding, question)
     plan = apply_intent_defaults(plan, understanding, load_intent_configs())
+    plan = apply_task_planning_defaults(
+        plan=plan,
+        understanding=understanding,
+        question=question,
+        source_available=source_available,
+    )
     return understanding, plan
 
 
@@ -99,6 +114,30 @@ def apply_intent_defaults(
         for step in steps
     ]
     return {**plan, "steps": updated_steps}
+
+
+def apply_task_planning_defaults(
+    plan: RetrievalPlan,
+    understanding: QuestionUnderstanding,
+    question: str,
+    source_available: bool,
+) -> RetrievalPlan:
+    """Add configured task-planning retrieval steps when needed."""
+    if understanding.get("intent") != task_planning_intent_name():
+        return plan
+
+    steps = list(plan.get("steps", []))
+    for default_step in task_planning_default_steps(question):
+        tool_name = _string(default_step.get("tool_name"), "")
+        if not tool_name:
+            continue
+        if tool_name == "source_read" and not source_available:
+            continue
+        if _has_tool_step(steps, tool_name):
+            continue
+        steps.append(_normalize_step(default_step, question))
+    steps = _order_task_planning_steps(steps, source_available)
+    return {**plan, "steps": steps}
 
 
 def _apply_step_intent_defaults(
@@ -163,6 +202,7 @@ def build_final_prompt(
             f"Evidence:\n{_evidence_summary(evidence)}",
             f"Source snippets:\n{_snippet_summary(source_snippets)}",
             f"Source reading skipped reason: {source_reading_skipped_reason}",
+            _task_planning_guidance(understanding),
             "Conversation history for reference only:\n"
             f"{_conversation_history_summary(conversation_history)}",
         ]
@@ -214,6 +254,47 @@ def _normalize_step(item: dict[str, object], fallback_query: str) -> PlanStep:
         "filters": filters if isinstance(filters, dict) else {},
         "reason": _string(item.get("reason"), ""),
     }
+
+
+def _has_tool_step(steps: list[PlanStep], tool_name: str) -> bool:
+    return any(step.get("tool_name") == tool_name for step in steps)
+
+
+def _order_task_planning_steps(
+    steps: list[PlanStep],
+    source_available: bool,
+) -> list[PlanStep]:
+    source_steps = [
+        step for step in steps if step.get("tool_name") == "source_read"
+    ]
+    non_source_steps = [
+        step for step in steps if step.get("tool_name") != "source_read"
+    ]
+    if not source_available or not source_steps:
+        return _order_known_task_planning_steps(non_source_steps)
+    ordered_steps = _order_known_task_planning_steps(non_source_steps)
+    return [*ordered_steps, source_steps[0]]
+
+
+def _order_known_task_planning_steps(steps: list[PlanStep]) -> list[PlanStep]:
+    tool_order = {
+        tool_name: index
+        for index, tool_name in enumerate(task_planning_tool_order())
+        if tool_name != "source_read"
+    }
+    return sorted(
+        steps,
+        key=lambda step: (
+            tool_order.get(step.get("tool_name", ""), len(tool_order)),
+            steps.index(step),
+        ),
+    )
+
+
+def _task_planning_guidance(understanding: QuestionUnderstanding) -> str:
+    if understanding.get("intent") != task_planning_intent_name():
+        return "Task planning guidance: not applicable."
+    return task_planning_prompt_guidance()
 
 
 def _evidence_summary(evidence: list[RagEvidence]) -> str:

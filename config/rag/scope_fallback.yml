@@ -1,0 +1,6 @@
+scope_fallback:
+  enabled: true
+  related_service_symbol_kinds:
+    - remote_service
+  related_service_limit: 3
+  related_table_limit_per_service: 20

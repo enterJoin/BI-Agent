@@ -13,8 +13,10 @@ from springgraph.rag.config.models import (
     MemoryConfig,
     RetrievalConfig,
     SafetyConfig,
+    ScopeFallbackConfig,
     SourceReadingConfig,
     TargetTraceConfig,
+    TaskPlanningConfig,
     ToolConfig,
 )
 
@@ -105,6 +107,52 @@ def load_target_trace_config() -> TargetTraceConfig:
     )
 
 
+@lru_cache(maxsize=1)
+def load_scope_fallback_config() -> ScopeFallbackConfig:
+    """Load fallback options for resolved module scopes with no local hits."""
+    data = _load_yaml(_config_path("scope_fallback.yml"))
+    raw_config = _mapping(data.get("scope_fallback"))
+    return ScopeFallbackConfig(
+        enabled=bool(raw_config.get("enabled", True)),
+        related_service_symbol_kinds=_string_list(
+            raw_config.get("related_service_symbol_kinds")
+        ),
+        related_service_limit=_int_value(
+            raw_config.get("related_service_limit"),
+            3,
+        ),
+        related_table_limit_per_service=_int_value(
+            raw_config.get("related_table_limit_per_service"),
+            20,
+        ),
+    )
+
+
+@lru_cache(maxsize=1)
+def load_task_planning_config() -> TaskPlanningConfig:
+    """Load task planning trigger terms, default steps, and answer guidance."""
+    data = _load_yaml(_config_path("task_planning.yml"))
+    raw_config = _mapping(data.get("task_planning"))
+    return TaskPlanningConfig(
+        intent_name=str(raw_config.get("intent_name", "task_planning")),
+        planning_terms=_string_list(raw_config.get("planning_terms")),
+        action_terms=_string_list(raw_config.get("action_terms")),
+        scope_terms=_string_list(raw_config.get("scope_terms")),
+        default_steps=_dict_list(raw_config.get("default_steps")),
+        output_sections=_string_list(raw_config.get("output_sections")),
+        schema_decision_rules=_string_list_mapping(
+            raw_config.get("schema_decision_rules")
+        ),
+        source_evidence_priorities=_int_mapping(
+            raw_config.get("source_evidence_priorities")
+        ),
+        default_source_evidence_priority=_int_value(
+            raw_config.get("default_source_evidence_priority"),
+            50,
+        ),
+    )
+
+
 def _config_path(name: str) -> Path:
     return Path(__file__).resolve().parents[4] / "config" / "rag" / name
 
@@ -139,6 +187,21 @@ def _int_mapping(value: object) -> dict[str, int]:
         except (TypeError, ValueError):
             continue
     return result
+
+
+def _string_list_mapping(value: object) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(raw_key): _string_list(raw_value)
+        for raw_key, raw_value in value.items()
+    }
+
+
+def _dict_list(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    return [cast(dict[str, object], item) for item in value if isinstance(item, dict)]
 
 
 def _int_value(value: object, fallback: int) -> int:

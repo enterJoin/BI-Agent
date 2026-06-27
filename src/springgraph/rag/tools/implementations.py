@@ -9,7 +9,10 @@ from sqlalchemy import Text, or_, select
 
 from springgraph.db import session_scope
 from springgraph.models import Edge, File, Symbol
-from springgraph.rag.config.loader import load_intent_configs
+from springgraph.rag.config.loader import (
+    load_intent_configs,
+    load_scope_fallback_config,
+)
 from springgraph.rag.config.models import ToolConfig
 from springgraph.rag.intent import TABLE_RETRIEVAL_INTENTS, infer_query_intent
 from springgraph.rag.library_hints import load_query_hints
@@ -127,11 +130,23 @@ class ArtifactSearchTool:
                     rows,
                     key=lambda row: _http_artifact_rank(row[0], row[1]),
                 )
+            fallback_evidence = []
+            if not rows and resolved_module:
+                fallback_evidence = _module_scope_fallback(
+                    session=session,
+                    project_id=tool_input.project_id,
+                    module=resolved_module,
+                    query=tool_input.query,
+                    scope="artifacts",
+                    include_related_tables=False,
+                    table_limit=0,
+                )
 
         evidence = [
             _symbol_evidence(symbol, file_row, "artifact")
             for symbol, file_row in rows
         ]
+        evidence.extend(fallback_evidence)
         return ToolResult(
             tool_name=self.config.name,
             summary=(
@@ -362,6 +377,18 @@ def _aggregate_tables(config: ToolConfig, tool_input: ToolInput) -> ToolResult:
         rows = session.execute(
             statement.order_by(File.path, Symbol.kind, Symbol.name).limit(limit)
         ).all()
+        rows = _rank_table_rows(rows, query)
+        fallback_evidence = []
+        if not rows and resolved_module:
+            fallback_evidence = _module_scope_fallback(
+                session=session,
+                project_id=tool_input.project_id,
+                module=resolved_module,
+                query=tool_input.query,
+                scope="tables",
+                include_related_tables=True,
+                table_limit=tool_input.top_k,
+            )
 
     evidence: list[RagEvidence] = []
     seen_tables: set[str] = set()
@@ -393,15 +420,297 @@ def _aggregate_tables(config: ToolConfig, tool_input: ToolInput) -> ToolResult:
                 },
             )
         )
+    evidence.extend(fallback_evidence)
     return ToolResult(
         tool_name=config.name,
         summary=(
             f"Aggregate table query query={query!r}, module={module!r}, "
             f"resolved_module={resolved_module!r} returned "
-            f"{len(evidence)} table evidence items."
+            f"{len(evidence)} evidence items."
         ),
         evidence=evidence,
     )
+
+
+def _rank_table_rows(
+    rows: list[tuple[Symbol, File]],
+    query: str,
+) -> list[tuple[Symbol, File]]:
+    terms = [term.lower() for term in _prioritized_terms(_query_terms(query))[:12]]
+
+    def rank(row: tuple[Symbol, File]) -> tuple[int, str, str]:
+        symbol, file_row = row
+        table_name = (_metadata_string(symbol.meta, "table") or symbol.name).lower()
+        haystack = " ".join(
+            [
+                table_name,
+                symbol.name,
+                symbol.qualified_name,
+                file_row.path,
+                file_row.module_name or "",
+                file_row.service_name or "",
+            ]
+        ).lower()
+        primary_match = any(
+            _matches_primary_table_name(table_name, term) for term in terms
+        )
+        if terms and primary_match:
+            priority = 0
+        elif terms and any(term in table_name for term in terms):
+            priority = 1
+        elif terms and any(term in haystack for term in terms):
+            priority = 2
+        else:
+            priority = 5
+        return (priority, file_row.path, symbol.name)
+
+    return sorted(rows, key=rank)
+
+
+def _matches_primary_table_name(table_name: str, term: str) -> bool:
+    return table_name == term or table_name.endswith(f"_{term}")
+
+
+def _module_scope_fallback(
+    session: Any,
+    project_id: str,
+    module: str,
+    query: str,
+    scope: str,
+    include_related_tables: bool,
+    table_limit: int,
+) -> list[RagEvidence]:
+    config = load_scope_fallback_config()
+    if not config.enabled:
+        return []
+    if not _module_has_files(session, project_id, module):
+        return []
+
+    evidence = [
+        _module_scope_empty_evidence(
+            module=module,
+            query=query,
+            scope=scope,
+        )
+    ]
+    related_rows = _module_related_service_rows(
+        session=session,
+        project_id=project_id,
+        module=module,
+        kinds=config.related_service_symbol_kinds,
+        limit=config.related_service_limit,
+    )
+    evidence.extend(_related_service_evidence(related_rows, module))
+    if include_related_tables:
+        related_services = _related_service_names(related_rows)
+        evidence.extend(
+            _related_service_table_evidence(
+                session=session,
+                project_id=project_id,
+                services=related_services,
+                limit_per_service=min(
+                    table_limit,
+                    config.related_table_limit_per_service,
+                ),
+            )
+        )
+    return _dedupe(evidence)
+
+
+def _module_has_files(session: Any, project_id: str, module: str) -> bool:
+    pattern = f"%{module}%"
+    row = session.execute(
+        select(File.id)
+        .where(File.project_id == project_id)
+        .where(
+            or_(
+                File.module_name.ilike(pattern),
+                File.service_name.ilike(pattern),
+                File.path.ilike(pattern),
+            )
+        )
+        .limit(1)
+    ).first()
+    return row is not None
+
+
+def _module_scope_empty_evidence(
+    module: str,
+    query: str,
+    scope: str,
+) -> RagEvidence:
+    return RagEvidence(
+        evidence_type="module_scope_empty",
+        source="module_scope",
+        symbol=f"module:{module}",
+        score=1.0,
+        content_excerpt=(
+            f"module={module}; scope={scope}; local_evidence=0; "
+            f"module_exists=true; query={query}"
+        ),
+        metadata={
+            "module_name": module,
+            "scope": scope,
+            "local_evidence_count": 0,
+            "module_exists": True,
+        },
+    )
+
+
+def _module_related_service_rows(
+    session: Any,
+    project_id: str,
+    module: str,
+    kinds: list[str],
+    limit: int,
+) -> list[tuple[Symbol, File]]:
+    if not kinds or limit <= 0:
+        return []
+    pattern = f"%{module}%"
+    rows = session.execute(
+        select(Symbol, File)
+        .join(File, File.id == Symbol.file_id)
+        .where(Symbol.project_id == project_id)
+        .where(Symbol.kind.in_(kinds))
+        .where(
+            or_(
+                File.module_name.ilike(pattern),
+                File.service_name.ilike(pattern),
+                File.path.ilike(pattern),
+            )
+        )
+        .order_by(File.path, Symbol.name)
+        .limit(limit)
+    ).all()
+    return cast(list[tuple[Symbol, File]], rows)
+
+
+def _related_service_evidence(
+    rows: list[tuple[Symbol, File]],
+    module: str,
+) -> list[RagEvidence]:
+    evidence: list[RagEvidence] = []
+    for symbol, file_row in rows:
+        service = _related_service_name(symbol)
+        evidence.append(
+            RagEvidence(
+                evidence_type="module_related_service",
+                source="module_scope",
+                file_path=file_row.path,
+                start_line=symbol.start_line,
+                end_line=symbol.end_line,
+                symbol=symbol.qualified_name,
+                score=1.0,
+                content_excerpt=(
+                    f"module={module}; related_service={service}; "
+                    f"artifact={symbol.name}; kind={symbol.kind}"
+                ),
+                metadata={
+                    "module_name": module,
+                    "related_service": service,
+                    "artifact_kind": symbol.kind,
+                    "service_name": file_row.service_name,
+                },
+            )
+        )
+    return evidence
+
+
+def _related_service_names(rows: list[tuple[Symbol, File]]) -> list[str]:
+    return _dedupe_terms(
+        [
+            service
+            for symbol, _ in rows
+            if (service := _related_service_name(symbol))
+        ]
+    )
+
+
+def _related_service_name(symbol: Symbol) -> str:
+    service = _metadata_string(symbol.meta, "service")
+    if service:
+        return service
+    if symbol.qualified_name.startswith(f"{symbol.kind}:"):
+        return symbol.qualified_name.split(":", 1)[1]
+    return symbol.name
+
+
+def _related_service_table_evidence(
+    session: Any,
+    project_id: str,
+    services: list[str],
+    limit_per_service: int,
+) -> list[RagEvidence]:
+    table_kinds = list(table_target_kinds())
+    if not table_kinds or limit_per_service <= 0:
+        return []
+
+    evidence: list[RagEvidence] = []
+    seen: set[str] = set()
+    for service in services:
+        rows = _service_table_rows(
+            session=session,
+            project_id=project_id,
+            service=service,
+            table_kinds=table_kinds,
+            limit=limit_per_service,
+        )
+        for symbol, file_row in rows:
+            table_name = _metadata_string(symbol.meta, "table") or symbol.name
+            marker = f"{service}|{table_name}|{file_row.path}"
+            if marker in seen:
+                continue
+            seen.add(marker)
+            evidence.append(
+                RagEvidence(
+                    evidence_type="related_service_table",
+                    source="module_scope",
+                    file_path=file_row.path,
+                    start_line=symbol.start_line,
+                    end_line=symbol.end_line,
+                    symbol=symbol.qualified_name,
+                    score=0.8,
+                    content_excerpt=(
+                        f"related_service={service}; table={table_name}; "
+                        f"artifact={symbol.name}; kind={symbol.kind}"
+                    ),
+                    metadata={
+                        "related_service": service,
+                        "table": table_name,
+                        "artifact_kind": symbol.kind,
+                        "module_name": file_row.module_name,
+                        "service_name": file_row.service_name,
+                    },
+                )
+            )
+    return evidence
+
+
+def _service_table_rows(
+    session: Any,
+    project_id: str,
+    service: str,
+    table_kinds: list[str],
+    limit: int,
+) -> list[tuple[Symbol, File]]:
+    pattern = f"%{service}%"
+    rows = session.execute(
+        select(Symbol, File)
+        .join(File, File.id == Symbol.file_id)
+        .where(Symbol.project_id == project_id)
+        .where(Symbol.kind.in_(table_kinds))
+        .where(
+            or_(
+                File.module_name.ilike(pattern),
+                File.service_name.ilike(pattern),
+                File.path.ilike(pattern),
+                Symbol.qualified_name.ilike(pattern),
+            )
+        )
+        .order_by(File.path, Symbol.kind, Symbol.name)
+        .limit(limit)
+    ).all()
+    return cast(list[tuple[Symbol, File]], rows)
 
 
 def _target_candidates(query: str, filters: dict[str, Any]) -> list[str]:

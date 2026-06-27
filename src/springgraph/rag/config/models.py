@@ -96,3 +96,28 @@ class TargetTraceConfig:
     persistence_edge_kinds: list[str] = field(default_factory=list)
     table_target_kinds: list[str] = field(default_factory=list)
     source_priorities: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ScopeFallbackConfig:
+    """Fallback evidence options when a resolved module has no local hits."""
+
+    enabled: bool = True
+    related_service_symbol_kinds: list[str] = field(default_factory=list)
+    related_service_limit: int = 3
+    related_table_limit_per_service: int = 20
+
+
+@dataclass(frozen=True)
+class TaskPlanningConfig:
+    """Task planning intent and response guidance."""
+
+    intent_name: str = "task_planning"
+    planning_terms: list[str] = field(default_factory=list)
+    action_terms: list[str] = field(default_factory=list)
+    scope_terms: list[str] = field(default_factory=list)
+    default_steps: list[dict[str, object]] = field(default_factory=list)
+    output_sections: list[str] = field(default_factory=list)
+    schema_decision_rules: dict[str, list[str]] = field(default_factory=dict)
+    source_evidence_priorities: dict[str, int] = field(default_factory=dict)
+    default_source_evidence_priority: int = 50

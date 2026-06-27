@@ -1,0 +1,120 @@
+task_planning:
+  intent_name: task_planning
+
+  planning_terms:
+    - 帮我规划
+    - 规划一下
+    - 实现方案
+    - 改造方案
+    - 修改方案
+    - 需要改哪些
+    - 影响范围
+    - 基于现有
+    - 基于已有
+    - 怎么改
+    - 如何改
+    - 怎么实现
+    - 如何实现
+    - plan
+    - implementation plan
+    - impact scope
+
+  action_terms:
+    - 新增
+    - 修改
+    - 改造
+    - 实现
+    - 接入
+    - 调整
+    - 扩展
+    - 加字段
+    - 新增字段
+    - 加列
+    - 新增列
+    - 建表
+    - 新增表
+    - add
+    - change
+    - modify
+    - implement
+    - refactor
+    - extend
+
+  scope_terms:
+    - 任务
+    - 需求
+    - 功能
+    - 字段
+    - 表
+    - 接口
+    - 方法
+    - 类
+    - 调用链
+    - 现有逻辑
+    - project
+    - feature
+    - field
+    - table
+    - api
+    - method
+    - class
+
+  default_steps:
+    - tool_name: artifact_search
+      query: "{question}"
+      filters:
+        intent: task_planning
+      reason: "Find existing entrypoints, classes, methods, DTO/VO, entities, mappers, and configs related to the requested change."
+    - tool_name: relation_search
+      query: "{question}"
+      filters:
+        intent: task_planning
+      reason: "Trace calls and dependencies around matched evidence to understand current logic and impact scope."
+    - tool_name: aggregate_query
+      query: "{question}"
+      filters:
+        intent: table_usage
+        group_by: table_name
+      reason: "Collect related tables, entities, mappers, and persistence artifacts for schema and data impact analysis."
+    - tool_name: source_read
+      query: "{question}"
+      filters:
+        intent: task_planning
+      reason: "Read key source snippets so the plan can name concrete classes, methods, interfaces, and table changes."
+
+  default_source_evidence_priority: 50
+  source_evidence_priorities:
+    table_usage: 0
+    target_match: 1
+    artifact: 2
+    target_relation:writes_table: 3
+    edge:writes_table: 4
+
+  output_sections:
+    - 任务理解
+    - 当前项目现状
+    - 关键证据
+    - 推荐方案
+    - 具体修改点
+    - 数据库变更
+    - 接口影响
+    - 类和方法修改建议
+    - 兼容性和风险
+    - 测试建议
+    - 仍需确认的问题
+
+  schema_decision_rules:
+    prefer_add_column_when:
+      - 新数据是已有业务对象的一对一属性
+      - 生命周期跟已有主对象一致
+      - 不需要多条历史记录
+      - 不需要独立权限或独立状态流转
+      - 不需要独立查询入口
+      - 已有主表已经承载同类属性
+    prefer_new_table_when:
+      - 新数据是一对多集合
+      - 需要历史记录或审计流水
+      - 有独立生命周期或独立状态
+      - 字段集合较大且可扩展
+      - 查询和权限模型独立
+      - 跨服务边界明显

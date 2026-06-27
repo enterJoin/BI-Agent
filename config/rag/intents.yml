@@ -77,3 +77,33 @@ intents:
       - call chain
       - process
       - execution
+
+  task_planning:
+    description: "Questions asking for a concrete development plan based on the current project code, interfaces, classes, methods, tables, and existing logic."
+    default_tool: artifact_search
+    default_filters: {}
+    chinese_terms:
+      - 帮我规划
+      - 实现方案
+      - 改造方案
+      - 修改方案
+      - 需要改哪些
+      - 影响范围
+      - 基于现有
+      - 基于已有
+      - 怎么改
+      - 如何改
+      - 加字段
+      - 新增字段
+      - 新增功能
+      - 修改功能
+    english_terms:
+      - plan
+      - implement
+      - implementation plan
+      - change
+      - modify
+      - refactor
+      - impact scope
+      - add field
+      - add column
