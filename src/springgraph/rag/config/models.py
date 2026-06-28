@@ -99,6 +99,14 @@ class TargetTraceConfig:
 
 
 @dataclass(frozen=True)
+class ExecutionTraceConfig:
+    """Execution trace trigger and target heuristics."""
+
+    trigger_terms: list[str] = field(default_factory=list)
+    entrypoint_suffixes: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class ScopeFallbackConfig:
     """Fallback evidence options when a resolved module has no local hits."""
 

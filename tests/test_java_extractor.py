@@ -147,3 +147,35 @@ def test_extracts_annotation_usages_and_values(tmp_path: Path) -> None:
         and edge.target_id in target_ids
         for edge in result.edges
     )
+
+
+def test_extracts_method_end_line_from_body(tmp_path: Path) -> None:
+    path = tmp_path / "Flow.java"
+    path.write_text(
+        "\n".join(
+            [
+                "package com.example;",
+                "public class Flow {",
+                "    public void run() {",
+                "        if (true) {",
+                "            return;",
+                "        }",
+                "    }",
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = extract_java_file(
+        "project:test",
+        path,
+        "demo/src/main/java/com/example/Flow.java",
+        "demo",
+        "demo",
+    )
+
+    method = next(symbol for symbol in result.symbols if symbol.name == "run")
+
+    assert method.start_line == 3
+    assert method.end_line == 7

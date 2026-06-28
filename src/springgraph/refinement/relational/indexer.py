@@ -187,6 +187,8 @@ def _upsert_file(
     row_id = file_row_id(project_id_value, scanned_file.relative_path)
     existing = session.get(File, row_id)
     if existing and existing.content_hash == digest and existing.error is None:
+        if _needs_method_range_refresh(session, row_id, content):
+            return True
         return False
 
     values = {
@@ -209,6 +211,32 @@ def _upsert_file(
     )
     session.execute(stmt)
     return True
+
+
+def _needs_method_range_refresh(
+    session: Session,
+    file_id: str,
+    content: str,
+) -> bool:
+    lines = content.splitlines()
+    if not lines:
+        return False
+    rows = session.execute(
+        select(Symbol.start_line, Symbol.end_line).where(
+            Symbol.file_id == file_id,
+            Symbol.kind.in_(["method", "constructor"]),
+            Symbol.end_line <= Symbol.start_line,
+        )
+    ).all()
+    for start_line, _ in rows:
+        if not isinstance(start_line, int):
+            continue
+        if start_line < 1 or start_line > len(lines):
+            continue
+        source_line = lines[start_line - 1]
+        if "{" in source_line and "}" not in source_line:
+            return True
+    return False
 
 
 def _upsert_file_error(

@@ -251,6 +251,7 @@ def extract_java_file(
 
             ctor_match = CTOR_RE.match(line)
             if ctor_match and ctor_match.group("name") == class_name:
+                body, end_index = _method_body(lines, i)
                 ctor_symbol = _method_like_symbol(
                     project_id_value,
                     relative_path,
@@ -259,6 +260,7 @@ def extract_java_file(
                     "constructor",
                     line,
                     i + 1,
+                    end_index + 1,
                     annotation_buffer,
                     module_name,
                     service_name,
@@ -292,7 +294,6 @@ def extract_java_file(
                     edges,
                     unresolved,
                 )
-                body, end_index = _method_body(lines, i)
                 _add_body_refs(
                     ctor_symbol, relative_path, body, i + 1, field_types, unresolved
                 )
@@ -303,6 +304,7 @@ def extract_java_file(
             method_match = METHOD_RE.match(line)
             if method_match and not _is_control_statement(method_match.group("return")):
                 method_name = method_match.group("name")
+                body, end_index = _method_body(lines, i)
                 method_symbol = _method_like_symbol(
                     project_id_value,
                     relative_path,
@@ -311,6 +313,7 @@ def extract_java_file(
                     "method",
                     line,
                     i + 1,
+                    end_index + 1,
                     annotation_buffer,
                     module_name,
                     service_name,
@@ -371,7 +374,6 @@ def extract_java_file(
                     module_name,
                     service_name,
                 )
-                body, end_index = _method_body(lines, i)
                 _add_body_refs(
                     method_symbol, relative_path, body, i + 1, field_types, unresolved
                 )
@@ -490,6 +492,7 @@ def _method_like_symbol(
     kind: SymbolKind,
     line: str,
     line_number: int,
+    end_line: int,
     annotations: list[Annotation],
     module_name: str | None,
     service_name: str | None,
@@ -505,7 +508,7 @@ def _method_like_symbol(
         file_path=relative_path,
         language="java",
         start_line=line_number,
-        end_line=line_number,
+        end_line=max(line_number, end_line),
         start_column=0,
         end_column=len(line),
         signature=line.strip(),

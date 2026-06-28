@@ -19,6 +19,12 @@ and list table names with their mapped artifact and source location.
 For HTTP route/interface answers, preserve the HTTP method exactly as shown in
 evidence. Do not infer GET/POST/PUT/DELETE from method names such as list,
 save, update, or delete. If evidence says ANY, answer ANY.
+For execution_flow questions with execution_trace evidence, answer as a
+step-by-step execution trace. Include entrypoint, loop/async boundaries,
+downstream calls or external interfaces, table reads/writes, message sends,
+data transformation/write payloads when evidenced, and explicit return/continue
+conditions. Do not stop at class/method definitions when source snippets contain
+method bodies.
 For task_planning intent, produce an implementation planning answer for
 developers. Base every concrete class, method, API, table, and field
 recommendation on Evidence or Source snippets. Use the Task planning guidance

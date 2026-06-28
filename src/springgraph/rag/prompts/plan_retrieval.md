@@ -47,6 +47,9 @@ Tool selection guidance:
 - target_trace: resolve an explicit target such as a table, method, route,
   external API, config key, message topic, or cache key, then trace incoming or
   outgoing writes, reads, calls, references, or usage relations.
+- execution_trace: trace a concrete method, scheduled job, listener, or API
+  handler into detailed source-level execution steps, downstream calls,
+  branches, return/continue conditions, table reads/writes, and messaging.
 - source_read: read source snippets only when source reading is allowed and
   prior evidence has file paths.
 
@@ -93,10 +96,14 @@ Do not use source_read for pure table-list questions unless the user explicitly
 asks for exact source code details.
 
 For execution flow questions, prefer:
-1. artifact_search to find the entry.
-2. relation_search with depth.
-3. aggregate_query to group stages and persistence points.
-4. source_read when exact source details are needed.
+1. execution_trace when the question asks for detailed steps, exact execution
+   flow, called interfaces, table reads/writes, inserted data, return,
+   continue, branch conditions, or exception paths.
+2. artifact_search to find the entry when the target is ambiguous.
+3. relation_search with depth for lightweight call/dependency expansion.
+4. aggregate_query to group stages and persistence points.
+5. source_read only when execution_trace is unavailable or more raw source is
+   needed.
 
 For task planning questions, prefer:
 1. artifact_search to find existing controllers, routes, services, methods,

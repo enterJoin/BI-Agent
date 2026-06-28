@@ -1,0 +1,28 @@
+execution_trace:
+  trigger_terms:
+    - 执行详细步骤
+    - 详细步骤
+    - 执行步骤
+    - 执行流程
+    - 详细流程
+    - 怎么执行
+    - 如何执行
+    - 调用了什么
+    - 查了什么表
+    - 插入了什么
+    - 写入了什么
+    - 什么情况会return
+    - 什么情况 return
+    - 什么情况会continue
+    - 什么情况 continue
+    - return
+    - continue
+    - execution flow
+    - execution steps
+    - call flow
+
+  entrypoint_suffixes:
+    - Handler
+    - Job
+    - Listener
+    - Task

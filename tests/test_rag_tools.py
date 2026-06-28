@@ -5,7 +5,11 @@ from springgraph.models import Edge, File, Symbol
 from springgraph.rag.config.models import ScopeFallbackConfig, ToolConfig
 from springgraph.rag.schemas import RagEvidence
 from springgraph.rag.tools import implementations
-from springgraph.rag.tools.implementations import AggregateQueryTool, TargetTraceTool
+from springgraph.rag.tools.implementations import (
+    AggregateQueryTool,
+    ExecutionTraceTool,
+    TargetTraceTool,
+)
 from springgraph.rag.tools.schemas import ToolInput, ToolResult
 
 
@@ -183,6 +187,120 @@ def test_target_trace_returns_target_and_write_relation(
         "guli-order-service/src/main/java/OrderOperateHistoryDao.java"
     )
     assert result.evidence[0].metadata["edge_kind"] == "writes_table"
+
+
+def test_execution_trace_reads_full_method_body(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "src/main/java/demo/Flow.java"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(
+        "\n".join(
+            [
+                "package demo;",
+                "public class Flow {",
+                "  public void run() {",
+                "    service.load();",
+                "    if (service.empty()) {",
+                "      return;",
+                "    }",
+                "    for (String item : items) {",
+                "      if (item == null) {",
+                "        continue;",
+                "      }",
+                "      kafkaService.send(topic, item);",
+                "    }",
+                "  }",
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    file_row = File(
+        id="file-flow",
+        project_id="project-1",
+        path="src/main/java/demo/Flow.java",
+        module_name="demo",
+        service_name="demo",
+        language="java",
+        content_hash="hash",
+        size_bytes=1,
+    )
+    symbol = Symbol(
+        id="method-run",
+        project_id="project-1",
+        file_id="file-flow",
+        kind="method",
+        name="run",
+        qualified_name="demo.Flow.run",
+        start_line=3,
+        end_line=14,
+        meta={},
+    )
+
+    class FakeSession:
+        pass
+
+    class FakeScope:
+        def __enter__(self) -> FakeSession:
+            return FakeSession()
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(implementations, "session_scope", lambda: FakeScope())
+    monkeypatch.setattr(
+        implementations,
+        "_resolve_execution_targets",
+        lambda **_: [(symbol, file_row)],
+    )
+    monkeypatch.setattr(
+        implementations,
+        "_resolve_downstream_methods",
+        lambda **_: [],
+    )
+    monkeypatch.setattr(
+        implementations,
+        "_resolve_sql_statement_rows",
+        lambda **_: [],
+    )
+    monkeypatch.setattr(
+        implementations,
+        "_trace_method_table_relations",
+        lambda **_: [],
+    )
+
+    tool = ExecutionTraceTool(
+        ToolConfig(
+            name="execution_trace",
+            description="",
+            capabilities=[],
+            requires=["project_id", "project_path"],
+        )
+    )
+
+    result = tool.invoke(
+        ToolInput(
+            query="run执行详细步骤是什么",
+            filters={},
+            project_id="project-1",
+            project_path=tmp_path,
+            top_k=8,
+            graph_depth=2,
+            source_available=True,
+            max_source_files=3,
+            max_source_lines=80,
+            source_line_padding=3,
+        )
+    )
+
+    assert result.tool_name == "execution_trace"
+    assert result.source_snippets[0].start_line == 3
+    assert result.source_snippets[0].end_line == 14
+    assert "continue;" in result.source_snippets[0].content
+    assert "control" in (result.evidence[0].content_excerpt or "")
+    assert "message" in (result.evidence[0].content_excerpt or "")
 
 
 def test_aggregate_tables_keeps_local_table_results_without_fallback(

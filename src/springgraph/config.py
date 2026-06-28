@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     embedding_base_url: str = "https://api.openai.com/v1"
     embedding_api_key: str = ""
     embedding_timeout_seconds: float = 60.0
+    embedding_batch_size: int = 8
+    embedding_max_concurrency: int = 4
+    embedding_max_retries: int = 3
+    embedding_retry_backoff_seconds: float = 1.0
     llm_provider: str = "openai-compatible"
     llm_model: str = "gpt-4o-mini"
     llm_base_url: str = "https://api.openai.com/v1"

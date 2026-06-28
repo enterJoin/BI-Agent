@@ -1,6 +1,7 @@
 """LLM planning helpers for controlled Agentic RAG."""
 
 import json
+import re
 from typing import Any, cast
 
 from springgraph.rag.agent.state import (
@@ -8,7 +9,10 @@ from springgraph.rag.agent.state import (
     QuestionUnderstanding,
     RetrievalPlan,
 )
-from springgraph.rag.config.loader import load_intent_configs
+from springgraph.rag.config.loader import (
+    load_execution_trace_config,
+    load_intent_configs,
+)
 from springgraph.rag.config.models import IntentConfig, ToolConfig
 from springgraph.rag.intent import infer_query_intent, intent_default_filters
 from springgraph.rag.llm import invoke_agent_model
@@ -56,6 +60,12 @@ def plan_question_retrieval(
         understanding["intent"] = task_planning_intent_name()
     plan = _normalize_plan(plan_payload, understanding, question)
     plan = apply_intent_defaults(plan, understanding, load_intent_configs())
+    plan = apply_execution_trace_defaults(
+        plan=plan,
+        understanding=understanding,
+        question=question,
+        source_available=source_available,
+    )
     plan = apply_task_planning_defaults(
         plan=plan,
         understanding=understanding,
@@ -63,6 +73,38 @@ def plan_question_retrieval(
         source_available=source_available,
     )
     return understanding, plan
+
+
+def apply_execution_trace_defaults(
+    plan: RetrievalPlan,
+    understanding: QuestionUnderstanding,
+    question: str,
+    source_available: bool,
+) -> RetrievalPlan:
+    """Prefer deep execution tracing for detailed flow questions."""
+    if not source_available or not _looks_like_execution_trace_question(question):
+        return plan
+    steps = [
+        step
+        for step in plan.get("steps", [])
+        if step.get("tool_name") != "source_read"
+    ]
+    if not _has_tool_step(steps, "execution_trace"):
+        steps.insert(
+            0,
+            {
+                "tool_name": "execution_trace",
+                "query": question,
+                "filters": {"intent": "execution_flow"},
+                "reason": (
+                    "Trace detailed execution steps, branches, calls, and "
+                    "persistence points."
+                ),
+            },
+        )
+    if understanding.get("intent") in {"unknown", ""}:
+        understanding["intent"] = "execution_flow"
+    return {**plan, "steps": steps}
 
 
 def _normalize_understanding(
@@ -260,6 +302,28 @@ def _has_tool_step(steps: list[PlanStep], tool_name: str) -> bool:
     return any(step.get("tool_name") == tool_name for step in steps)
 
 
+def _looks_like_execution_trace_question(question: str) -> bool:
+    config = load_execution_trace_config()
+    lowered = question.lower()
+    if _has_configured_entrypoint_suffix(lowered, config.entrypoint_suffixes):
+        return True
+    return any(
+        term.lower() in lowered
+        for term in config.trigger_terms
+    )
+
+
+def _has_configured_entrypoint_suffix(
+    lowered_question: str,
+    suffixes: list[str],
+) -> bool:
+    for suffix in suffixes:
+        pattern = rf"\b[A-Za-z_][A-Za-z0-9_]*{re.escape(suffix.lower())}\b"
+        if re.search(pattern, lowered_question):
+            return True
+    return False
+
+
 def _order_task_planning_steps(
     steps: list[PlanStep],
     source_available: bool,
@@ -308,8 +372,9 @@ def _evidence_summary(evidence: list[RagEvidence]) -> str:
         route_details = _route_details(item)
         if route_details:
             details = f"{details}; {route_details}" if details else route_details
-        if len(details) > 280:
-            details = f"{details[:277]}..."
+        detail_limit = 1600 if item.source == "execution_trace" else 280
+        if len(details) > detail_limit:
+            details = f"{details[: detail_limit - 3]}..."
         lines.append(
             f"{index}. [{item.source}/{item.evidence_type}] "
             f"{item.symbol or ''} at {location}; {details}"
@@ -322,7 +387,7 @@ def _snippet_summary(snippets: list[SourceSnippet]) -> str:
     for index, snippet in enumerate(snippets, start=1):
         lines.append(
             f"{index}. {snippet.file_path}:{snippet.start_line}-{snippet.end_line}\n"
-            f"{snippet.content[:500]}"
+            f"{snippet.content[:2500]}"
         )
     return "\n\n".join(lines) if lines else "No source snippets."
 

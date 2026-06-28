@@ -3,6 +3,7 @@
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import Text, or_, select
@@ -12,11 +13,12 @@ from springgraph.models import Edge, File, Symbol
 from springgraph.rag.config.loader import (
     load_intent_configs,
     load_scope_fallback_config,
+    load_target_trace_config,
 )
 from springgraph.rag.config.models import ToolConfig
 from springgraph.rag.intent import TABLE_RETRIEVAL_INTENTS, infer_query_intent
 from springgraph.rag.library_hints import load_query_hints
-from springgraph.rag.schemas import RagEvidence
+from springgraph.rag.schemas import RagEvidence, SourceSnippet
 from springgraph.rag.source_reader import check_source_path, read_source_snippets
 from springgraph.rag.target_trace import (
     persistence_edge_kinds,
@@ -63,6 +65,31 @@ _GENERIC_QUERY_EXPANSIONS = {
     "api": ["endpoint", "route", "controller", "mapping"],
     "endpoint": ["api", "route", "controller", "mapping"],
 }
+
+_CONTROL_FLOW_RE = re.compile(r"\b(if|else\s+if|else|for|while|switch|catch)\b")
+_RETURN_CONTINUE_RE = re.compile(r"\b(return|continue|break)\b")
+_JAVA_CALL_RE = re.compile(
+    r"\b(?P<receiver>[A-Za-z_][A-Za-z0-9_]*)\.(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\("
+)
+_JAVA_METHOD_REF_RE = re.compile(
+    r"\b(?:this|[A-Za-z_][A-Za-z0-9_]*)::"
+    r"(?P<method>[A-Za-z_][A-Za-z0-9_]*)"
+)
+_JAVA_LOCAL_CALL_RE = re.compile(r"\b(?P<method>[a-z][A-Za-z0-9_]*)\s*\(")
+_SQL_TABLE_RE = re.compile(
+    r"\b(?:from|join|into|update)\s+`?(?P<table>[A-Za-z_][\w.]*)`?",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class _MethodSource:
+    symbol: Symbol
+    file_row: File
+    start_line: int
+    end_line: int
+    content: str
+
 @dataclass(frozen=True)
 class ArtifactSearchTool:
     """Batch search code artifacts from relational indexes."""
@@ -292,6 +319,136 @@ class TargetTraceTool:
 
 
 @dataclass(frozen=True)
+class ExecutionTraceTool:
+    """Trace detailed method execution from source and graph evidence."""
+
+    config: ToolConfig
+
+    def invoke(self, tool_input: ToolInput) -> ToolResult:
+        if not tool_input.source_available:
+            return ToolResult(
+                tool_name=self.config.name,
+                summary="Execution trace skipped because source is unavailable.",
+                warnings=["execution_trace skipped: source_available=false"],
+            )
+        allowed, reason = check_source_path(tool_input.project_path)
+        if not allowed:
+            return ToolResult(
+                tool_name=self.config.name,
+                summary=f"Execution trace skipped: {reason}.",
+                warnings=[f"execution_trace skipped: {reason}"],
+            )
+
+        target_terms = _execution_target_candidates(
+            tool_input.query,
+            tool_input.filters,
+        )
+        limit = _limit(tool_input.top_k, multiplier=4)
+        with session_scope() as session:
+            target_rows = _resolve_execution_targets(
+                session=session,
+                project_id=tool_input.project_id,
+                target_terms=target_terms,
+                limit=limit,
+            )
+            method_sources = _read_method_sources(
+                root=tool_input.project_path,
+                rows=target_rows,
+                max_methods=max(1, min(tool_input.top_k, 6)),
+                max_lines=max(tool_input.max_source_lines, 180),
+            )
+            downstream_rows = _resolve_downstream_methods(
+                session=session,
+                project_id=tool_input.project_id,
+                method_sources=method_sources,
+                limit=limit,
+            )
+            downstream_sources = _read_method_sources(
+                root=tool_input.project_path,
+                rows=downstream_rows,
+                max_methods=max(1, min(tool_input.top_k, 8)),
+                max_lines=max(tool_input.max_source_lines, 220),
+            )
+            second_downstream_rows = _resolve_downstream_methods(
+                session=session,
+                project_id=tool_input.project_id,
+                method_sources=downstream_sources,
+                limit=limit,
+            )
+            second_downstream_sources = _read_method_sources(
+                root=tool_input.project_path,
+                rows=second_downstream_rows,
+                max_methods=max(1, min(tool_input.top_k, 8)),
+                max_lines=max(tool_input.max_source_lines, 180),
+            )
+            sql_rows = _resolve_sql_statement_rows(
+                session=session,
+                project_id=tool_input.project_id,
+                method_refs=_called_method_refs(
+                    [
+                        *method_sources,
+                        *downstream_sources,
+                        *second_downstream_sources,
+                    ]
+                ),
+                limit=limit,
+            )
+            sql_sources = _read_method_sources(
+                root=tool_input.project_path,
+                rows=sql_rows,
+                max_methods=max(1, min(tool_input.top_k, 10)),
+                max_lines=max(tool_input.max_source_lines, 160),
+            )
+            table_rows = _trace_method_table_relations(
+                session=session,
+                project_id=tool_input.project_id,
+                symbol_ids=[
+                    item.symbol.id
+                    for item in [
+                        *method_sources,
+                        *downstream_sources,
+                        *second_downstream_sources,
+                        *sql_sources,
+                    ]
+                ],
+                limit=limit,
+            )
+
+        all_sources = _dedupe_method_sources(
+            [
+                *method_sources,
+                *downstream_sources,
+                *second_downstream_sources,
+                *sql_sources,
+            ]
+        )
+        evidence = _execution_trace_evidence(all_sources)
+        evidence.extend(_execution_table_evidence(table_rows))
+        source_snippets = [
+            SourceSnippet(
+                file_path=item.file_row.path,
+                start_line=item.start_line,
+                end_line=item.end_line,
+                content=item.content,
+            )
+            for item in all_sources[: max(2, tool_input.max_source_files * 2)]
+        ]
+        warnings: list[str] = []
+        if not all_sources:
+            warnings.append("execution_trace found no readable method body")
+        return ToolResult(
+            tool_name=self.config.name,
+            summary=(
+                f"Execution trace targets={target_terms}, methods_read="
+                f"{len(all_sources)}, table_relations={len(table_rows)}."
+            ),
+            evidence=_dedupe(evidence),
+            source_snippets=source_snippets,
+            warnings=warnings,
+        )
+
+
+@dataclass(frozen=True)
 class SourceReadTool:
     """Read source snippets for selected evidence."""
 
@@ -336,9 +493,513 @@ def create_tool(config: ToolConfig) -> RagTool:
         return AggregateQueryTool(config)
     if config.name == "target_trace":
         return TargetTraceTool(config)
+    if config.name == "execution_trace":
+        return ExecutionTraceTool(config)
     if config.name == "source_read":
         return SourceReadTool(config)
     raise ValueError(f"Unsupported RAG tool implementation: {config.name}")
+
+
+def _resolve_execution_targets(
+    session: Any,
+    project_id: str,
+    target_terms: list[str],
+    limit: int,
+) -> list[tuple[Symbol, File]]:
+    if not target_terms:
+        return []
+    filters = []
+    for term in target_terms[:8]:
+        pattern = f"%{term}%"
+        filters.extend(
+            [
+                Symbol.name.ilike(pattern),
+                Symbol.qualified_name.ilike(pattern),
+                Symbol.meta.cast(Text).ilike(pattern),
+                File.path.ilike(pattern),
+            ]
+        )
+    rows = session.execute(
+        select(Symbol, File)
+        .join(File, File.id == Symbol.file_id)
+        .where(Symbol.project_id == project_id)
+        .where(Symbol.kind.in_(["method", "constructor", "route"]))
+        .where(or_(*filters))
+        .limit(limit)
+    ).all()
+    return _rank_execution_target_rows(rows, target_terms)
+
+
+def _execution_target_candidates(
+    query: str,
+    filters: dict[str, Any],
+) -> list[str]:
+    values = _target_candidates(query, filters)
+    explicit_target = _optional_string(filters.get("target"))
+    if explicit_target:
+        values.append(explicit_target)
+    values.extend(_string_list(filters.get("targets")))
+    generic = {term.lower() for term in load_target_trace_config().generic_terms}
+    for term in _query_terms(query):
+        lowered = term.lower()
+        if lowered in generic:
+            continue
+        if len(term) < 3:
+            continue
+        if _looks_like_java_identifier(term):
+            values.append(term)
+    return _dedupe_terms(values)
+
+
+def _looks_like_java_identifier(term: str) -> bool:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", term):
+        return False
+    return (
+        any(char.isupper() for char in term[1:])
+        or term.endswith(("Handler", "Job", "Listener", "Task", "Service"))
+    )
+
+
+def _rank_execution_target_rows(
+    rows: list[tuple[Symbol, File]],
+    target_terms: list[str],
+) -> list[tuple[Symbol, File]]:
+    lowered_terms = [term.lower() for term in target_terms]
+
+    def rank(row: tuple[Symbol, File]) -> tuple[int, str, int, str]:
+        symbol, file_row = row
+        exact = symbol.name.lower() in lowered_terms
+        qualified = symbol.qualified_name.lower() in lowered_terms
+        path = file_row.path.lower()
+        if qualified:
+            priority = 0
+        elif exact and "/service/" in path.replace("\\", "/"):
+            priority = 1
+        elif exact:
+            priority = 2
+        else:
+            priority = 4
+        return (priority, file_row.path, symbol.start_line, symbol.qualified_name)
+
+    return sorted(rows, key=rank)
+
+
+def _read_method_sources(
+    root: Path,
+    rows: list[tuple[Symbol, File]],
+    max_methods: int,
+    max_lines: int,
+) -> list[_MethodSource]:
+    sources: list[_MethodSource] = []
+    seen: set[tuple[str, int]] = set()
+    project_root = root.resolve()
+    for symbol, file_row in rows:
+        if len(sources) >= max_methods:
+            break
+        if symbol.start_line is None:
+            continue
+        marker = (file_row.path, symbol.start_line)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        source_path = (project_root / file_row.path).resolve()
+        if not _is_relative_to(source_path, project_root):
+            continue
+        if not source_path.exists() or not source_path.is_file():
+            continue
+        lines = _read_text(source_path).splitlines()
+        start_line, end_line = _method_source_window(
+            lines=lines,
+            start_line=symbol.start_line,
+            end_line=symbol.end_line,
+            max_lines=max_lines,
+        )
+        if start_line > end_line:
+            continue
+        sources.append(
+            _MethodSource(
+                symbol=symbol,
+                file_row=file_row,
+                start_line=start_line,
+                end_line=end_line,
+                content="\n".join(lines[start_line - 1 : end_line]),
+            )
+        )
+    return sources
+
+
+def _method_source_window(
+    lines: list[str],
+    start_line: int,
+    end_line: int | None,
+    max_lines: int,
+) -> tuple[int, int]:
+    total_lines = len(lines)
+    if total_lines == 0:
+        return (1, 0)
+    start = max(1, start_line)
+    inferred_end = end_line if end_line and end_line > start_line else None
+    if inferred_end is None:
+        inferred_end = _infer_block_end_line(lines, start)
+    end = min(total_lines, max(start, inferred_end))
+    if end - start + 1 > max_lines:
+        end = start + max_lines - 1
+    return (start, min(total_lines, end))
+
+
+def _infer_block_end_line(lines: list[str], start_line: int) -> int:
+    brace_depth = 0
+    seen_open = False
+    for index in range(start_line - 1, len(lines)):
+        line = _strip_line_comment(lines[index])
+        brace_depth += line.count("{")
+        if "{" in line:
+            seen_open = True
+        brace_depth -= line.count("}")
+        if seen_open and brace_depth <= 0:
+            return index + 1
+    return min(len(lines), start_line + 80)
+
+
+def _resolve_downstream_methods(
+    session: Any,
+    project_id: str,
+    method_sources: list[_MethodSource],
+    limit: int,
+) -> list[tuple[Symbol, File]]:
+    method_names = _called_method_names(method_sources)
+    if not method_names:
+        return []
+    rows = session.execute(
+        select(Symbol, File)
+        .join(File, File.id == Symbol.file_id)
+        .where(Symbol.project_id == project_id)
+        .where(Symbol.kind.in_(["method", "constructor"]))
+        .where(Symbol.name.in_(method_names[:80]))
+        .limit(limit)
+    ).all()
+    return _rank_downstream_rows(rows, method_sources, method_names)
+
+
+def _resolve_sql_statement_rows(
+    session: Any,
+    project_id: str,
+    method_refs: list[tuple[str, str]],
+    limit: int,
+) -> list[tuple[Symbol, File]]:
+    if not method_refs:
+        return []
+    exact_filters = []
+    fallback_names: list[str] = []
+    for receiver, method in method_refs[:120]:
+        fallback_names.append(method)
+        mapper_name = _receiver_mapper_name(receiver)
+        if mapper_name is None:
+            continue
+        exact_filters.append(Symbol.qualified_name.ilike(f"%{mapper_name}#{method}"))
+    filters = list(exact_filters)
+    if fallback_names and not exact_filters:
+        filters.append(Symbol.name.in_(fallback_names))
+    rows = session.execute(
+        select(Symbol, File)
+        .join(File, File.id == Symbol.file_id)
+        .where(Symbol.project_id == project_id)
+        .where(Symbol.kind == "sql_statement")
+        .where(or_(*filters))
+        .limit(limit)
+    ).all()
+    exact_names = {
+        f"{_receiver_mapper_name(receiver)}#{method}": index
+        for index, (receiver, method) in enumerate(method_refs)
+        if _receiver_mapper_name(receiver) is not None
+    }
+    name_order = {
+        method: index
+        for index, (_, method) in enumerate(method_refs)
+        if method not in exact_names
+    }
+    return sorted(
+        rows,
+        key=lambda row: (
+            _sql_statement_priority(row[0], exact_names),
+            name_order.get(row[0].name, len(name_order)),
+            row[1].path,
+            row[0].start_line,
+        ),
+    )
+
+
+def _called_method_refs(method_sources: list[_MethodSource]) -> list[tuple[str, str]]:
+    refs: list[tuple[str, str]] = []
+    for item in method_sources:
+        for match in _JAVA_CALL_RE.finditer(item.content):
+            method = match.group("method")
+            if _is_generic_call(method):
+                continue
+            refs.append((match.group("receiver"), method))
+    seen: set[tuple[str, str]] = set()
+    result: list[tuple[str, str]] = []
+    for ref in refs:
+        if ref in seen:
+            continue
+        seen.add(ref)
+        result.append(ref)
+    return result
+
+
+def _receiver_mapper_name(receiver: str) -> str | None:
+    if not receiver.lower().endswith("mapper"):
+        return None
+    return receiver[:1].upper() + receiver[1:]
+
+
+def _sql_statement_priority(
+    symbol: Symbol,
+    exact_names: dict[str, int],
+) -> int:
+    for marker in exact_names:
+        if symbol.qualified_name.endswith(marker):
+            return 0
+    return 5
+
+
+def _called_method_names(method_sources: list[_MethodSource]) -> list[str]:
+    ignored = {
+        "catch",
+        "for",
+        "if",
+        "new",
+        "return",
+        "switch",
+        "throw",
+        "while",
+    }
+    names: list[str] = []
+    for item in method_sources:
+        content = item.content
+        names.extend(
+            match.group("method")
+            for match in _JAVA_CALL_RE.finditer(content)
+            if not _is_generic_call(match.group("method"))
+        )
+        names.extend(
+            match.group("method") for match in _JAVA_METHOD_REF_RE.finditer(content)
+        )
+        for match in _JAVA_LOCAL_CALL_RE.finditer(content):
+            method = match.group("method")
+            if method not in ignored and not _is_generic_call(method):
+                names.append(method)
+    return _dedupe_terms(names)
+
+
+def _is_generic_call(method: str) -> bool:
+    return method in {
+        "add",
+        "collect",
+        "contains",
+        "equals",
+        "filter",
+        "forEach",
+        "format",
+        "get",
+        "getOrDefault",
+        "getValue",
+        "identity",
+        "info",
+        "isEmpty",
+        "isNotEmpty",
+        "map",
+        "newArrayList",
+        "of",
+        "parseLong",
+        "put",
+        "set",
+        "stream",
+        "toJsonString",
+        "toList",
+        "toMap",
+    }
+
+
+def _rank_downstream_rows(
+    rows: list[tuple[Symbol, File]],
+    method_sources: list[_MethodSource],
+    method_names: list[str],
+) -> list[tuple[Symbol, File]]:
+    source_paths = {item.file_row.path for item in method_sources}
+    source_classes = {
+        item.symbol.qualified_name.rsplit(".", maxsplit=1)[0]
+        for item in method_sources
+    }
+    name_order = {name: index for index, name in enumerate(method_names)}
+    source_ids = {item.symbol.id for item in method_sources}
+
+    def rank(row: tuple[Symbol, File]) -> tuple[int, int, str, int]:
+        symbol, file_row = row
+        if symbol.id in source_ids:
+            priority = 9
+        elif file_row.path in source_paths:
+            priority = 0
+        elif symbol.qualified_name.rsplit(".", maxsplit=1)[0] in source_classes:
+            priority = 1
+        else:
+            priority = 4
+        return (
+            priority,
+            name_order.get(symbol.name, len(name_order)),
+            file_row.path,
+            symbol.start_line,
+        )
+
+    return sorted(rows, key=rank)
+
+
+def _trace_method_table_relations(
+    session: Any,
+    project_id: str,
+    symbol_ids: list[str],
+    limit: int,
+) -> list[tuple[Edge, Symbol, Symbol, File]]:
+    if not symbol_ids:
+        return []
+    from sqlalchemy.orm import aliased
+
+    source = aliased(Symbol)
+    target = aliased(Symbol)
+    file_alias = aliased(File)
+    rows = session.execute(
+        select(Edge, source, target, file_alias)
+        .join(source, source.id == Edge.source_id)
+        .join(target, target.id == Edge.target_id)
+        .join(file_alias, file_alias.id == source.file_id)
+        .where(Edge.project_id == project_id)
+        .where(Edge.source_id.in_(symbol_ids))
+        .where(Edge.kind.in_(["reads_table", "writes_table", "defines_contract"]))
+        .limit(limit)
+    ).all()
+    return _rank_relation_rows(rows)
+
+
+def _execution_trace_evidence(
+    method_sources: list[_MethodSource],
+) -> list[RagEvidence]:
+    evidence: list[RagEvidence] = []
+    for item in method_sources:
+        details = _execution_details(item.content)
+        evidence.append(
+            RagEvidence(
+                evidence_type="execution_method",
+                source="execution_trace",
+                file_path=item.file_row.path,
+                start_line=item.start_line,
+                end_line=item.end_line,
+                symbol=item.symbol.qualified_name,
+                score=1.0,
+                content_excerpt=details,
+                metadata={
+                    "symbol_id": item.symbol.id,
+                    "kind": item.symbol.kind,
+                    "method": item.symbol.name,
+                    "line_count": item.end_line - item.start_line + 1,
+                },
+            )
+        )
+    return evidence
+
+
+def _execution_details(content: str) -> str:
+    lines = content.splitlines()
+    details: list[str] = []
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if _CONTROL_FLOW_RE.search(line) or _RETURN_CONTINUE_RE.search(line):
+            details.append(f"control[{line_number}]: {line}")
+        elif "kafkaService.send" in line or ".send(" in line:
+            details.append(f"message[{line_number}]: {line}")
+        else:
+            call_match = _JAVA_CALL_RE.search(line)
+            if call_match:
+                details.append(
+                    f"call[{line_number}]: "
+                    f"{call_match.group('receiver')}.{call_match.group('method')}"
+                )
+        for table in _tables_from_source_line(line):
+            details.append(f"table_hint[{line_number}]: {table}")
+        if len(details) >= 220:
+            break
+    return "\n".join(details) if details else content[:1200]
+
+
+def _tables_from_source_line(line: str) -> list[str]:
+    return [
+        match.group("table").split(".", maxsplit=1)[-1]
+        for match in _SQL_TABLE_RE.finditer(line)
+    ]
+
+
+def _execution_table_evidence(
+    rows: list[tuple[Edge, Symbol, Symbol, File]],
+) -> list[RagEvidence]:
+    evidence: list[RagEvidence] = []
+    for edge, source, target, file_row in rows:
+        evidence.append(
+            RagEvidence(
+                evidence_type=f"execution_table:{edge.kind}",
+                source="execution_trace",
+                file_path=file_row.path,
+                start_line=edge.line,
+                end_line=edge.line,
+                symbol=f"{source.qualified_name} -> {target.qualified_name}",
+                score=float(edge.confidence),
+                content_excerpt=(
+                    f"{source.qualified_name} {edge.kind} "
+                    f"{target.qualified_name}"
+                ),
+                metadata={
+                    "edge_id": edge.id,
+                    "edge_kind": edge.kind,
+                    "source_symbol_id": source.id,
+                    "target_symbol_id": target.id,
+                    "table": _metadata_string(target.meta, "table") or target.name,
+                },
+            )
+        )
+    return evidence
+
+
+def _dedupe_method_sources(items: list[_MethodSource]) -> list[_MethodSource]:
+    seen: set[tuple[str, int, str]] = set()
+    result: list[_MethodSource] = []
+    for item in items:
+        key = (item.file_row.path, item.start_line, item.symbol.qualified_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def _strip_line_comment(line: str) -> str:
+    return line.split("//", maxsplit=1)[0]
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _read_text(path: Path) -> str:
+    for encoding in ("utf-8", "gbk"):
+        try:
+            return path.read_text(encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+    return path.read_text(encoding="utf-8", errors="ignore")
 
 
 def _aggregate_tables(config: ToolConfig, tool_input: ToolInput) -> ToolResult:

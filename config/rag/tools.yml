@@ -43,6 +43,19 @@ tools:
     requires:
       - project_id
 
+  - name: execution_trace
+    description: "Trace a concrete method, scheduled job, listener, or API handler into detailed execution steps, source branches, downstream calls, table reads/writes, messaging, and return/continue conditions."
+    capabilities:
+      - execution_flow
+      - method_body_reading
+      - branch_analysis
+      - downstream_call_trace
+      - table_io_trace
+      - source_reading
+    requires:
+      - project_id
+      - project_path
+
   - name: source_read
     description: "在项目路径存在且允许读取源码时，读取证据对应的源码片段。"
     capabilities:

@@ -9,6 +9,7 @@ import yaml
 from springgraph.rag.config.models import (
     AgenticRagConfig,
     ContextConfig,
+    ExecutionTraceConfig,
     IntentConfig,
     MemoryConfig,
     RetrievalConfig,
@@ -104,6 +105,17 @@ def load_target_trace_config() -> TargetTraceConfig:
         ),
         table_target_kinds=_string_list(raw_config.get("table_target_kinds")),
         source_priorities=_int_mapping(raw_config.get("source_priorities")),
+    )
+
+
+@lru_cache(maxsize=1)
+def load_execution_trace_config() -> ExecutionTraceConfig:
+    """Load execution trace trigger heuristics."""
+    data = _load_yaml(_config_path("execution_trace.yml"))
+    raw_config = _mapping(data.get("execution_trace"))
+    return ExecutionTraceConfig(
+        trigger_terms=_string_list(raw_config.get("trigger_terms")),
+        entrypoint_suffixes=_string_list(raw_config.get("entrypoint_suffixes")),
     )
 
 

@@ -1,6 +1,7 @@
 """Persistence helpers for semantic refinement."""
 
 import logging
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +44,15 @@ class FileChangePlan:
     changed: list[RefinedFile]
     unchanged: list[RefinedFile]
     content_hashes: dict[str, str]
+
+
+@dataclass(frozen=True)
+class _EmbeddingInput:
+    """Chunk data needed to build one embedding row."""
+
+    chunk_id: str
+    content: str
+    content_hash: str
 
 
 class RefinementRepository:
@@ -308,14 +318,18 @@ class RefinementRepository:
         started_at = perf_counter()
         logger.info(
             "Chunk and embedding upsert started: project_id=%s, chunks=%s, "
-            "embedding_model=%s, embedding_dim=%s",
+            "embedding_model=%s, embedding_dim=%s, batch_size=%s, "
+            "max_concurrency=%s",
             self.project_id,
             len(chunks),
             embedder.model_name,
             embedder.dimensions,
+            embedder.batch_size,
+            embedder.max_concurrency,
         )
         chunk_count = 0
         embedding_count = 0
+        embedding_inputs: list[_EmbeddingInput] = []
         for chunk in chunks:
             chunk_id = _chunk_id(self.project_id, chunk)
             content_digest = content_hash(chunk.content)
@@ -353,36 +367,15 @@ class RefinementRepository:
             )
             self.session.execute(stmt)
             chunk_count += 1
+            embedding_inputs.append(
+                _EmbeddingInput(
+                    chunk_id=chunk_id,
+                    content=chunk.content,
+                    content_hash=content_digest,
+                )
+            )
 
-            embedding = embedder.embed(chunk.content)
-            embedding_id = _embedding_id(
-                self.project_id,
-                chunk_id,
-                embedder.model_name,
-                embedder.dimensions,
-                content_digest,
-            )
-            embedding_values = {
-                "id": embedding_id,
-                "chunk_id": chunk_id,
-                "project_id": self.project_id,
-                "embedding_model": embedder.model_name,
-                "embedding_dim": embedder.dimensions,
-                "embedding": embedding,
-                "content_hash": content_digest,
-                "status": "active",
-            }
-            embedding_table = cast(Table, ChunkEmbedding.__table__)
-            embedding_stmt = insert(embedding_table).values(**embedding_values)
-            embedding_stmt = embedding_stmt.on_conflict_do_update(
-                index_elements=[embedding_table.c.id],
-                set_={
-                    key: getattr(embedding_stmt.excluded, key)
-                    for key in embedding_values
-                },
-            )
-            self.session.execute(embedding_stmt)
-            embedding_count += 1
+        embedding_count = self._upsert_embedding_inputs(embedding_inputs, embedder)
         logger.info(
             "Chunk and embedding upsert completed: project_id=%s, "
             "chunks_upserted=%s, embeddings_upserted=%s, elapsed_seconds=%.3f",
@@ -392,6 +385,115 @@ class RefinementRepository:
             perf_counter() - started_at,
         )
         return chunk_count, embedding_count
+
+    def _upsert_embedding(
+        self,
+        chunk_id: str,
+        content_digest: str,
+        embedding: list[float],
+        embedder: Embedder,
+    ) -> None:
+        embedding_id = _embedding_id(
+            self.project_id,
+            chunk_id,
+            embedder.model_name,
+            embedder.dimensions,
+            content_digest,
+        )
+        embedding_values = {
+            "id": embedding_id,
+            "chunk_id": chunk_id,
+            "project_id": self.project_id,
+            "embedding_model": embedder.model_name,
+            "embedding_dim": embedder.dimensions,
+            "embedding": embedding,
+            "content_hash": content_digest,
+            "status": "active",
+        }
+        embedding_table = cast(Table, ChunkEmbedding.__table__)
+        embedding_stmt = insert(embedding_table).values(**embedding_values)
+        embedding_stmt = embedding_stmt.on_conflict_do_update(
+            index_elements=[embedding_table.c.id],
+            set_={
+                key: getattr(embedding_stmt.excluded, key)
+                for key in embedding_values
+            },
+        )
+        self.session.execute(embedding_stmt)
+
+    def _upsert_embedding_inputs(
+        self,
+        inputs: list[_EmbeddingInput],
+        embedder: Embedder,
+    ) -> int:
+        if not inputs:
+            return 0
+        batches = _batched(inputs, embedder.batch_size)
+        if embedder.max_concurrency <= 1 or len(batches) <= 1:
+            return self._upsert_embedding_batches(batches, embedder)
+        return self._upsert_embedding_batches_concurrently(batches, embedder)
+
+    def _upsert_embedding_batches(
+        self,
+        batches: list[list[_EmbeddingInput]],
+        embedder: Embedder,
+    ) -> int:
+        embedding_count = 0
+        for batch in batches:
+            embeddings = embedder.embed_batch([item.content for item in batch])
+            embedding_count += self._upsert_embedding_batch(
+                batch,
+                embeddings,
+                embedder,
+            )
+        return embedding_count
+
+    def _upsert_embedding_batches_concurrently(
+        self,
+        batches: list[list[_EmbeddingInput]],
+        embedder: Embedder,
+    ) -> int:
+        max_workers = min(embedder.max_concurrency, len(batches))
+        embedding_count = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures: dict[Future[list[list[float]]], list[_EmbeddingInput]] = {
+                executor.submit(
+                    embedder.embed_batch,
+                    [item.content for item in batch],
+                ): batch
+                for batch in batches
+            }
+            try:
+                for future in as_completed(futures):
+                    batch = futures[future]
+                    embeddings = future.result()
+                    embedding_count += self._upsert_embedding_batch(
+                        batch,
+                        embeddings,
+                        embedder,
+                    )
+            except Exception:
+                for future in futures:
+                    future.cancel()
+                raise
+        return embedding_count
+
+    def _upsert_embedding_batch(
+        self,
+        batch: list[_EmbeddingInput],
+        embeddings: list[list[float]],
+        embedder: Embedder,
+    ) -> int:
+        embedding_count = 0
+        for item, embedding in zip(batch, embeddings, strict=True):
+            self._upsert_embedding(
+                item.chunk_id,
+                item.content_hash,
+                embedding,
+                embedder,
+            )
+            embedding_count += 1
+        return embedding_count
 
     def chunks_missing_embeddings(
         self,
@@ -433,43 +535,26 @@ class RefinementRepository:
         started_at = perf_counter()
         logger.info(
             "Missing embedding upsert started: project_id=%s, chunks=%s, "
-            "embedding_model=%s, embedding_dim=%s",
+            "embedding_model=%s, embedding_dim=%s, batch_size=%s, "
+            "max_concurrency=%s",
             self.project_id,
             len(chunks),
             embedder.model_name,
             embedder.dimensions,
+            embedder.batch_size,
+            embedder.max_concurrency,
         )
-        embedding_count = 0
-        embedding_table = cast(Table, ChunkEmbedding.__table__)
-        for chunk in chunks:
-            embedding = embedder.embed(chunk.content)
-            embedding_id = _embedding_id(
-                self.project_id,
-                chunk.id,
-                embedder.model_name,
-                embedder.dimensions,
-                chunk.content_hash,
-            )
-            embedding_values = {
-                "id": embedding_id,
-                "chunk_id": chunk.id,
-                "project_id": self.project_id,
-                "embedding_model": embedder.model_name,
-                "embedding_dim": embedder.dimensions,
-                "embedding": embedding,
-                "content_hash": chunk.content_hash,
-                "status": "active",
-            }
-            embedding_stmt = insert(embedding_table).values(**embedding_values)
-            embedding_stmt = embedding_stmt.on_conflict_do_update(
-                index_elements=[embedding_table.c.id],
-                set_={
-                    key: getattr(embedding_stmt.excluded, key)
-                    for key in embedding_values
-                },
-            )
-            self.session.execute(embedding_stmt)
-            embedding_count += 1
+        embedding_count = self._upsert_embedding_inputs(
+            [
+                _EmbeddingInput(
+                    chunk_id=chunk.id,
+                    content=chunk.content,
+                    content_hash=chunk.content_hash,
+                )
+                for chunk in chunks
+            ],
+            embedder,
+        )
         logger.info(
             "Missing embedding upsert completed: project_id=%s, "
             "embeddings_upserted=%s, elapsed_seconds=%.3f",
@@ -543,6 +628,14 @@ def _embedding_id(
 ) -> str:
     raw = f"{project_id_value}:{chunk_id}:{model_name}:{dimensions}:{content_digest}"
     return f"embedding:{digest(raw, 32)}"
+
+
+def _batched[T](items: list[T], size: int) -> list[list[T]]:
+    batch_size = max(1, size)
+    return [
+        items[index : index + batch_size]
+        for index in range(0, len(items), batch_size)
+    ]
 
 
 def _read_text(path: Path) -> str:

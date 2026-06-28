@@ -1,9 +1,11 @@
+from springgraph.rag.agent import planner
 from springgraph.rag.agent.planner import (
     apply_intent_defaults,
     apply_task_planning_defaults,
 )
 from springgraph.rag.agent.state import QuestionUnderstanding, RetrievalPlan
 from springgraph.rag.config.loader import (
+    load_execution_trace_config,
     load_intent_configs,
     load_target_trace_config,
     load_task_planning_config,
@@ -38,6 +40,19 @@ def test_target_trace_heuristics_are_config_driven() -> None:
     assert trace_target_tokens("OrderOperateHistoryServiceImpl") == [
         "OrderOperateHistoryServiceImpl"
     ]
+
+
+def test_execution_trace_heuristics_are_config_driven() -> None:
+    config = load_execution_trace_config()
+
+    assert "\u8be6\u7ec6\u6b65\u9aa4" in config.trigger_terms
+    assert "Handler" in config.entrypoint_suffixes
+    assert planner._looks_like_execution_trace_question(
+        "tencentMaterialReportHandler"
+    )
+    assert planner._looks_like_execution_trace_question(
+        "syncOrder\u6267\u884c\u8be6\u7ec6\u6b65\u9aa4"
+    )
 
 
 def test_task_planning_config_drives_default_steps() -> None:

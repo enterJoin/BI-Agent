@@ -168,7 +168,9 @@ def execute_retrieval_plan(state: AgenticRagState) -> AgenticRagState:
                     result.warnings
                 )
 
-    if "source_read" not in state.get("used_tools", []):
+    if "source_read" not in state.get("used_tools", []) and not state.get(
+        "source_snippets"
+    ):
         state["source_reading_skipped_reason"] = "not_requested_by_retrieval_plan"
     return state
 
@@ -176,13 +178,14 @@ def execute_retrieval_plan(state: AgenticRagState) -> AgenticRagState:
 def generate_final_answer(state: AgenticRagState) -> AgenticRagState:
     """Generate the final answer from accumulated evidence."""
     context_config = state["runtime_config"].context
+    max_source_snippets = context_config.max_source_snippets
+    if "execution_trace" in state.get("used_tools", []):
+        max_source_snippets = max(max_source_snippets, 6)
     prompt = planner.build_final_prompt(
         question=state["question"],
         understanding=state["question_understanding"],
         evidence=state.get("evidence", [])[: context_config.max_evidence_items],
-        source_snippets=state.get("source_snippets", [])[
-            : context_config.max_source_snippets
-        ],
+        source_snippets=state.get("source_snippets", [])[:max_source_snippets],
         observations=state.get("observations", []),
         conversation_history=state.get("conversation_history", []),
         source_reading_skipped_reason=state.get("source_reading_skipped_reason"),
