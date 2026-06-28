@@ -11,6 +11,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql.elements import ColumnElement
 
 from springgraph.db import session_scope
+from springgraph.java_constants import (
+    clean_java_expression,
+    constants_for_root,
+    resolve_java_string_expression,
+)
 from springgraph.models import Edge, File, Symbol
 from springgraph.rag.config.loader import (
     load_aggregation_specs,
@@ -521,7 +526,9 @@ class ExecutionTraceTool:
             ]
         )
         evidence = _execution_trace_evidence(all_sources)
-        evidence.extend(_execution_message_evidence(all_sources))
+        evidence.extend(
+            _execution_message_evidence(all_sources, tool_input.project_path)
+        )
         evidence.extend(_execution_table_evidence(table_rows))
         source_snippets = [
             SourceSnippet(
@@ -1388,15 +1395,17 @@ def _execution_trace_evidence(
 
 def _execution_message_evidence(
     method_sources: list[_MethodSource],
+    project_path: Path | None = None,
 ) -> list[RagEvidence]:
     evidence: list[RagEvidence] = []
+    constants = constants_for_root(str(project_path.resolve())) if project_path else {}
     for item in method_sources:
         assignments = _source_assignments(item.content)
         for line_offset, line in enumerate(item.content.splitlines(), start=0):
             match = _JAVA_SEND_RE.search(line)
             if match is not None:
-                topic_expr = _clean_source_expr(match.group("topic"))
-                for topic in _resolve_source_expr(topic_expr, assignments):
+                topic_expr = clean_java_expression(match.group("topic"))
+                for topic in _resolve_source_expr(topic_expr, assignments, constants):
                     evidence.append(
                         _message_publish_evidence(
                             item=item,
@@ -1412,8 +1421,14 @@ def _execution_message_evidence(
             rocket_match = _JAVA_ROCKET_SEND_RE.search(line)
             if rocket_match is None:
                 continue
-            destination_expr = _clean_source_expr(rocket_match.group("destination"))
-            for destination in _resolve_source_expr(destination_expr, assignments):
+            destination_expr = clean_java_expression(
+                rocket_match.group("destination")
+            )
+            for destination in _resolve_source_expr(
+                destination_expr,
+                assignments,
+                constants,
+            ):
                 topic, tag = _source_topic_and_tag(destination)
                 evidence.append(
                     _message_publish_evidence(
@@ -1468,7 +1483,7 @@ def _source_assignments(content: str) -> dict[str, list[str]]:
     assignments: dict[str, list[str]] = {}
     for match in _JAVA_ASSIGNMENT_RE.finditer(content):
         name = match.group("name")
-        value = _clean_source_expr(match.group("value"))
+        value = clean_java_expression(match.group("value"))
         if not name or not value:
             continue
         assignments.setdefault(name, []).append(value)
@@ -1478,21 +1493,21 @@ def _source_assignments(content: str) -> dict[str, list[str]]:
 def _resolve_source_expr(
     expression: str,
     assignments: dict[str, list[str]],
+    constants: dict[str, str],
 ) -> list[str]:
     if expression in assignments:
-        return _dedupe_terms(assignments[expression])
-    return [expression] if expression else []
-
-
-def _clean_source_expr(value: str) -> str:
-    return value.strip().strip('"')
+        values: list[str] = []
+        for assigned in assignments[expression]:
+            values.extend(resolve_java_string_expression(assigned, constants))
+        return _dedupe_terms(values)
+    return resolve_java_string_expression(expression, constants)
 
 
 def _source_topic_and_tag(destination: str) -> tuple[str, str | None]:
-    value = _clean_source_expr(destination)
+    value = clean_java_expression(destination)
     if ":" in value and "://" not in value:
         topic, tag = value.split(":", maxsplit=1)
-        return (_clean_source_expr(topic), _clean_source_expr(tag) or None)
+        return (clean_java_expression(topic), clean_java_expression(tag) or None)
     return (value, None)
 
 

@@ -36,7 +36,8 @@ CLASS_RE = re.compile(
 )
 FIELD_RE = re.compile(
     r"^\s*(?:private|protected|public)?\s*(?:static\s+)?(?:final\s+)?"
-    r"(?P<type>[A-Z][\w<>?, ]*)\s+(?P<name>[a-zA-Z_]\w*)\s*(?:=.*)?;"
+    r"(?P<type>[A-Z][\w<>?, ]*)\s+(?P<name>[a-zA-Z_]\w*)"
+    r"\s*(?:=\s*(?P<value>[^;]+))?;"
 )
 METHOD_RE = re.compile(
     r"^\s*(?:public|protected|private)?\s*(?:static\s+)?"
@@ -461,6 +462,14 @@ def _field_symbol(
     name = match.group("name")
     qualified_name = member_fqn(class_qualified_name, name)
     field_type = _clean_type(match.group("type"))
+    value = match.group("value")
+    metadata: dict[str, object] = {
+        "type": field_type,
+        "module_name": module_name,
+        "service_name": service_name,
+    }
+    if value is not None:
+        metadata["value"] = value.strip().strip('"')
     return SymbolData(
         id=symbol_id(
             project_id_value, relative_path, "field", qualified_name, line_number
@@ -476,11 +485,7 @@ def _field_symbol(
         end_column=0,
         signature=f"{field_type} {name}",
         annotations=[item.name for item in annotations],
-        metadata={
-            "type": field_type,
-            "module_name": module_name,
-            "service_name": service_name,
-        },
+        metadata=metadata,
     )
 
 

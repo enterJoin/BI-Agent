@@ -7,6 +7,11 @@ from urllib.parse import urlparse
 import yaml
 
 from springgraph.hashing import digest
+from springgraph.java_constants import (
+    clean_java_expression,
+    constants_for_file,
+    resolve_java_string_expression,
+)
 from springgraph.refinement._types import (
     ChunkFact,
     EdgeFact,
@@ -115,7 +120,13 @@ def extract_file_facts(
     if language == "mybatis_xml":
         return _extract_mybatis_xml(source, relative_path, module_name, service_name)
     if language == "java":
-        return _extract_java(source, relative_path, module_name, service_name)
+        return _extract_java(
+            source,
+            path,
+            relative_path,
+            module_name,
+            service_name,
+        )
     if language == "config":
         return _extract_config(source, path, relative_path, module_name, service_name)
     if language == "html":
@@ -127,6 +138,7 @@ def extract_file_facts(
 
 def _extract_java(
     source: str,
+    path: Path,
     relative_path: str,
     module_name: str | None,
     service_name: str | None,
@@ -344,7 +356,16 @@ def _extract_java(
             )
         )
 
-    _extract_java_messaging(source, relative_path, service_name, symbols, edges, chunks)
+    constants = constants_for_file(path, relative_path)
+    _extract_java_messaging(
+        source,
+        relative_path,
+        service_name,
+        constants,
+        symbols,
+        edges,
+        chunks,
+    )
     _extract_java_cache(source, relative_path, service_name, symbols, edges, chunks)
     _extract_java_security(source, relative_path, service_name, symbols, edges, chunks)
     _extract_oauth_mentions(
@@ -604,6 +625,7 @@ def _extract_java_messaging(
     source: str,
     relative_path: str,
     service_name: str | None,
+    constants: dict[str, str],
     symbols: list[SymbolFact],
     edges: list[EdgeFact],
     chunks: list[ChunkFact],
@@ -656,7 +678,8 @@ def _extract_java_messaging(
         chunks.append(_mq_chunk(relative_path, mq_key, "publishes", target, line))
     for match in KAFKA_SEND_RE.finditer(source):
         line = _line_for_offset(source, match.start())
-        for topic in _resolve_java_values(match.group("topic"), assignments):
+        raw_topic = clean_java_expression(match.group("topic"))
+        for topic in _resolve_java_values(raw_topic, assignments, constants):
             _add_topic_publish(
                 symbols=symbols,
                 edges=edges,
@@ -667,12 +690,15 @@ def _extract_java_messaging(
                 tag=None,
                 line=line,
                 source="kafka_send",
+                raw_destination=raw_topic,
             )
     for match in ROCKET_SEND_RE.finditer(source):
         line = _line_for_offset(source, match.start())
+        raw_destination = clean_java_expression(match.group("destination"))
         for destination in _resolve_java_values(
-            match.group("destination"),
+            raw_destination,
             assignments,
+            constants,
         ):
             topic, tag = _topic_and_tag(destination)
             _add_topic_publish(
@@ -685,6 +711,7 @@ def _extract_java_messaging(
                 tag=tag,
                 line=line,
                 source="rocketmq_send",
+                raw_destination=raw_destination,
             )
 
 
@@ -1012,6 +1039,7 @@ def _add_topic_publish(
     tag: str | None,
     line: int,
     source: str,
+    raw_destination: str | None = None,
 ) -> None:
     if not topic:
         return
@@ -1024,6 +1052,7 @@ def _add_topic_publish(
         topic=topic,
         tag=tag,
         source=source,
+        raw_destination=raw_destination,
     )
     edges.append(
         EdgeFact(
@@ -1031,7 +1060,12 @@ def _add_topic_publish(
             target_key=topic_key,
             kind="publishes",
             line=line,
-            metadata={"topic": topic, "tag": tag, "source": source},
+            metadata={
+                "topic": topic,
+                "tag": tag,
+                "source": source,
+                "raw_destination": raw_destination,
+            },
         )
     )
     chunks.append(
@@ -1053,6 +1087,7 @@ def _add_topic_publish(
             topic=topic,
             tag=tag,
             source=source,
+            raw_destination=raw_destination,
         )
         edges.append(
             EdgeFact(
@@ -1060,7 +1095,12 @@ def _add_topic_publish(
                 target_key=tag_key,
                 kind="publishes",
                 line=line,
-                metadata={"topic": topic, "tag": tag, "source": source},
+                metadata={
+                    "topic": topic,
+                    "tag": tag,
+                    "source": source,
+                    "raw_destination": raw_destination,
+                },
             )
         )
         chunks.append(
@@ -1088,11 +1128,15 @@ def _java_assignments(source: str) -> dict[str, list[str]]:
 def _resolve_java_values(
     expression: str,
     assignments: dict[str, list[str]],
+    constants: dict[str, str],
 ) -> list[str]:
-    value = _clean_java_value(expression)
+    value = clean_java_expression(expression)
     if value in assignments:
-        return _dedupe_strings(assignments[value])
-    return [value] if value else []
+        resolved: list[str] = []
+        for assigned in assignments[value]:
+            resolved.extend(resolve_java_string_expression(assigned, constants))
+        return _dedupe_strings(resolved)
+    return resolve_java_string_expression(value, constants)
 
 
 def _topic_and_tag(destination: str) -> tuple[str, str | None]:

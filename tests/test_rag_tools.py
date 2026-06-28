@@ -400,6 +400,64 @@ def test_execution_message_evidence_resolves_topic_variable() -> None:
     assert evidence[0].metadata["topic"] == "BIConstants.MATERIAL_REPORT_TOPIC"
 
 
+def test_execution_message_evidence_resolves_project_constant(
+    tmp_path: Path,
+) -> None:
+    constants_path = tmp_path / "src/main/java/demo/BIConstants.java"
+    constants_path.parent.mkdir(parents=True)
+    constants_path.write_text(
+        "\n".join(
+            [
+                "package demo;",
+                "public class BIConstants {",
+                "  public static final String MATERIAL_REPORT_TOPIC = "
+                '"materialReportTopic";',
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    file_row = File(
+        id="file-flow",
+        project_id="project-1",
+        path="src/main/java/demo/Flow.java",
+        module_name="demo",
+        service_name="demo",
+        language="java",
+        content_hash="hash",
+        size_bytes=1,
+    )
+    symbol = Symbol(
+        id="method-run",
+        project_id="project-1",
+        file_id="file-flow",
+        kind="method",
+        name="run",
+        qualified_name="demo.Flow.run",
+        start_line=10,
+        end_line=14,
+    )
+    source = implementations._MethodSource(
+        symbol=symbol,
+        file_row=file_row,
+        start_line=10,
+        end_line=14,
+        content="\n".join(
+            [
+                "void run() {",
+                "  String topic = BIConstants.MATERIAL_REPORT_TOPIC;",
+                "  kafkaService.send(topic, payload);",
+                "}",
+            ]
+        ),
+    )
+
+    evidence = implementations._execution_message_evidence([source], tmp_path)
+
+    assert evidence[0].metadata["topic"] == "materialReportTopic"
+    assert evidence[0].metadata["raw_destination"] == "topic"
+
+
 def test_execution_message_evidence_resolves_rocket_topic_tag() -> None:
     file_row = File(
         id="file-flow",

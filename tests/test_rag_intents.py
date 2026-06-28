@@ -268,6 +268,7 @@ def test_context_constraints_force_execution_trace_targets(
         "materialReportHandler",
     ]
     assert steps[0]["filters"]["constraint_scope"] == "hard"
+    assert steps[1]["tool_name"] == "aggregate_query"
     assert steps[1]["filters"]["constraint_scope"] == "soft_context"
 
 

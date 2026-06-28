@@ -55,7 +55,21 @@ def test_extracts_table_mapper_sql_and_oauth_facts() -> None:
 
 
 def test_extracts_message_topic_and_rocket_tag_facts(tmp_path: Path) -> None:
-    source_path = tmp_path / "MessagePublisher.java"
+    constants_path = tmp_path / "src/main/java/demo/BIConstants.java"
+    constants_path.parent.mkdir(parents=True, exist_ok=True)
+    constants_path.write_text(
+        "\n".join(
+            [
+                "package demo;",
+                "public class BIConstants {",
+                "  public static final String MATERIAL_REPORT_TOPIC = "
+                '"materialReportTopic";',
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    source_path = tmp_path / "src/main/java/demo/MessagePublisher.java"
     source_path.write_text(
         "\n".join(
             [
@@ -81,11 +95,11 @@ def test_extracts_message_topic_and_rocket_tag_facts(tmp_path: Path) -> None:
     symbol_names = {symbol.qualified_name for symbol in facts.symbols}
     edges = {(edge.target_key, edge.kind) for edge in facts.edges}
 
-    assert "mq_topic:BIConstants.MATERIAL_REPORT_TOPIC" in symbol_names
+    assert "mq_topic:materialReportTopic" in symbol_names
     assert "mq_topic:order-topic" in symbol_names
     assert "mq_tag:order-topic:paid" in symbol_names
     assert (
-        "mq_topic:BIConstants.MATERIAL_REPORT_TOPIC",
+        "mq_topic:materialReportTopic",
         "publishes",
     ) in edges
     assert ("mq_topic:order-topic", "publishes") in edges
