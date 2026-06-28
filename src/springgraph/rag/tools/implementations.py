@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import Text, or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql.elements import ColumnElement
 
 from springgraph.db import session_scope
@@ -95,6 +96,14 @@ _SQL_TABLE_RE = re.compile(
     r"\b(?:from|join|into|update)\s+`?(?P<table>[A-Za-z_][\w.]*)`?",
     re.IGNORECASE,
 )
+_SOURCE_READ_RELATION_EDGE_KINDS = {
+    "calls",
+    "contains",
+    "reads_table",
+    "writes_table",
+    "defines_contract",
+    "implements",
+}
 
 
 @dataclass(frozen=True)
@@ -558,13 +567,21 @@ class SourceReadTool:
                 summary=f"Source reading skipped: {reason}.",
                 warnings=[f"source_read skipped: {reason}"],
             )
+        expanded_evidence, expansion_warnings = (
+            _expand_source_read_evidence_by_relations(
+                project_id=tool_input.project_id,
+                evidence=tool_input.evidence,
+                limit=max(tool_input.max_source_files * 4, tool_input.top_k * 2),
+            )
+        )
         snippets, warnings = read_source_snippets(
             tool_input.project_path,
-            tool_input.evidence,
+            expanded_evidence,
             max_files=tool_input.max_source_files,
             max_lines=tool_input.max_source_lines,
             line_padding=tool_input.source_line_padding,
         )
+        warnings = [*expansion_warnings, *warnings]
         evidence_scope = _source_read_scope(tool_input.evidence)
         evidence = [
             RagEvidence(
@@ -579,9 +596,13 @@ class SourceReadTool:
             )
             for snippet in snippets
         ]
+        expanded_count = max(0, len(expanded_evidence) - len(tool_input.evidence))
         return ToolResult(
             tool_name=self.config.name,
-            summary=f"Source read returned {len(snippets)} snippets.",
+            summary=(
+                f"Source read returned {len(snippets)} snippets "
+                f"after relation expansion added {expanded_count} evidence items."
+            ),
             evidence=evidence,
             source_snippets=snippets,
             warnings=warnings,
@@ -594,6 +615,104 @@ def _source_read_scope(evidence: list[RagEvidence]) -> str:
     if any(item.metadata.get("evidence_scope") == "soft" for item in evidence):
         return "soft"
     return "unscoped"
+
+
+def _expand_source_read_evidence_by_relations(
+    project_id: str,
+    evidence: list[RagEvidence],
+    limit: int,
+) -> tuple[list[RagEvidence], list[str]]:
+    seed_ids = _evidence_symbol_ids(evidence)
+    if not seed_ids:
+        return evidence, []
+    normalized_limit = max(1, min(limit, 80))
+    warnings: list[str] = []
+    try:
+        relation_rows = _source_read_relation_rows(
+            project_id=project_id,
+            seed_ids=seed_ids,
+            limit=normalized_limit + 1,
+        )
+    except SQLAlchemyError as exc:
+        return evidence, [f"source_read relation expansion skipped: {exc}"]
+    if len(relation_rows) > normalized_limit:
+        warnings.append(
+            "source_read relation expansion truncated at "
+            f"{normalized_limit} related symbols."
+        )
+        relation_rows = relation_rows[:normalized_limit]
+    expanded = [
+        _source_read_relation_evidence(edge, symbol, file_row, direction)
+        for edge, symbol, file_row, direction in relation_rows
+    ]
+    return _dedupe([*evidence, *expanded]), warnings
+
+
+def _source_read_relation_rows(
+    project_id: str,
+    seed_ids: list[str],
+    limit: int,
+) -> list[tuple[Edge, Symbol, File, str]]:
+    from sqlalchemy.orm import aliased
+
+    source = aliased(Symbol)
+    target = aliased(Symbol)
+    source_file = aliased(File)
+    target_file = aliased(File)
+    statement = (
+        select(Edge, source, source_file, target, target_file)
+        .join(source, source.id == Edge.source_id)
+        .join(source_file, source_file.id == source.file_id)
+        .join(target, target.id == Edge.target_id)
+        .join(target_file, target_file.id == target.file_id)
+        .where(Edge.project_id == project_id)
+        .where(or_(Edge.source_id.in_(seed_ids), Edge.target_id.in_(seed_ids)))
+        .where(Edge.kind.in_(sorted(_SOURCE_READ_RELATION_EDGE_KINDS)))
+        .order_by(Edge.kind, source_file.path, source.start_line, target_file.path)
+        .limit(limit)
+    )
+    rows: list[tuple[Edge, Symbol, File, str]] = []
+    with session_scope() as session:
+        for edge, source_symbol, source_file_row, target_symbol, target_file_row in (
+            session.execute(statement).all()
+        ):
+            if edge.source_id in seed_ids and edge.target_id not in seed_ids:
+                rows.append((edge, target_symbol, target_file_row, "outgoing"))
+            elif edge.target_id in seed_ids and edge.source_id not in seed_ids:
+                rows.append((edge, source_symbol, source_file_row, "incoming"))
+            else:
+                rows.append((edge, target_symbol, target_file_row, "seed_relation"))
+    return rows
+
+
+def _source_read_relation_evidence(
+    edge: Edge,
+    symbol: Symbol,
+    file_row: File,
+    direction: str,
+) -> RagEvidence:
+    return RagEvidence(
+        evidence_type=f"source_relation:{edge.kind}",
+        source="source_read_relation",
+        file_path=file_row.path,
+        start_line=symbol.start_line,
+        end_line=symbol.end_line,
+        symbol=symbol.qualified_name,
+        score=float(edge.confidence),
+        content_excerpt=(
+            f"{direction} {edge.kind} relation for source_read expansion; "
+            f"symbol={symbol.qualified_name}; kind={symbol.kind}"
+        ),
+        metadata={
+            "symbol_id": symbol.id,
+            "edge_id": edge.id,
+            "edge_kind": edge.kind,
+            "direction": direction,
+            "module_name": file_row.module_name,
+            "service_name": file_row.service_name,
+            "metadata": _json_safe(symbol.meta),
+        },
+    )
 
 
 def create_tool(config: ToolConfig) -> RagTool:

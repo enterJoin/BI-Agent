@@ -238,6 +238,126 @@ def test_source_read_returns_source_snippet_evidence(tmp_path: Path) -> None:
     assert result.evidence[0].metadata["evidence_scope"] == "hard"
 
 
+def test_source_read_expands_one_hop_relations(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    entry_path = tmp_path / "src/main/java/demo/Entry.java"
+    entry_path.parent.mkdir(parents=True)
+    entry_path.write_text(
+        "class Entry {\n  void run() {\n    service.save();\n  }\n}\n",
+        encoding="utf-8",
+    )
+    service_path = tmp_path / "src/main/java/demo/Service.java"
+    service_path.write_text(
+        "class Service {\n  void save() {\n    dao.insert();\n  }\n}\n",
+        encoding="utf-8",
+    )
+    entry_file = File(
+        id="file-entry",
+        project_id="project-1",
+        path="src/main/java/demo/Entry.java",
+        module_name="demo",
+        service_name="demo",
+        language="java",
+        content_hash="hash",
+        size_bytes=1,
+    )
+    service_file = File(
+        id="file-service",
+        project_id="project-1",
+        path="src/main/java/demo/Service.java",
+        module_name="demo",
+        service_name="demo",
+        language="java",
+        content_hash="hash",
+        size_bytes=1,
+    )
+    entry_symbol = Symbol(
+        id="symbol-entry",
+        project_id="project-1",
+        file_id="file-entry",
+        kind="method",
+        name="run",
+        qualified_name="demo.Entry.run",
+        language="java",
+        start_line=2,
+        end_line=4,
+    )
+    service_symbol = Symbol(
+        id="symbol-service",
+        project_id="project-1",
+        file_id="file-service",
+        kind="method",
+        name="save",
+        qualified_name="demo.Service.save",
+        language="java",
+        start_line=2,
+        end_line=4,
+    )
+    edge = Edge(
+        id=1,
+        project_id="project-1",
+        source_id="symbol-entry",
+        target_id="symbol-service",
+        kind="calls",
+        line=3,
+        confidence=1.0,
+        resolved_by="extractor",
+        meta={},
+    )
+
+    class FakeRows:
+        def all(self) -> list[tuple[Edge, Symbol, File, Symbol, File]]:
+            return [(edge, entry_symbol, entry_file, service_symbol, service_file)]
+
+    class FakeSession:
+        def execute(self, statement: object) -> FakeRows:
+            return FakeRows()
+
+    class FakeScope:
+        def __enter__(self) -> FakeSession:
+            return FakeSession()
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(implementations, "session_scope", lambda: FakeScope())
+    tool = implementations.SourceReadTool(
+        ToolConfig(name="source_read", description="read source")
+    )
+
+    result = tool.invoke(
+        ToolInput(
+            query="read source",
+            filters={},
+            project_id="project-1",
+            project_path=tmp_path,
+            top_k=5,
+            graph_depth=1,
+            source_available=True,
+            max_source_files=3,
+            max_source_lines=20,
+            source_line_padding=0,
+            evidence=[
+                RagEvidence(
+                    evidence_type="execution_method",
+                    source="execution_trace",
+                    file_path="src/main/java/demo/Entry.java",
+                    start_line=2,
+                    end_line=4,
+                    metadata={"symbol_id": "symbol-entry"},
+                )
+            ],
+        )
+    )
+
+    snippet_paths = {snippet.file_path for snippet in result.source_snippets}
+    assert "src/main/java/demo/Entry.java" in snippet_paths
+    assert "src/main/java/demo/Service.java" in snippet_paths
+    assert "relation expansion added 1 evidence items" in result.summary
+
+
 def test_execution_message_evidence_resolves_topic_variable() -> None:
     file_row = File(
         id="file-flow",
