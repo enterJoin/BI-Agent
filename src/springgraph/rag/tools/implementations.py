@@ -30,6 +30,7 @@ from springgraph.rag.target_trace import (
     target_candidates,
 )
 from springgraph.rag.tools.schemas import RagTool, ToolInput, ToolResult
+from springgraph.vector_search import VectorSearchError, search_project_vectors
 
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$.:/-]*")
 _MODULE_GENERIC_TERMS = {
@@ -92,6 +93,57 @@ class _MethodSource:
     start_line: int
     end_line: int
     content: str
+
+
+@dataclass(frozen=True)
+class VectorSearchTool:
+    """Search semantic vector chunks for library knowledge and code context."""
+
+    config: ToolConfig
+
+    def invoke(self, tool_input: ToolInput) -> ToolResult:
+        try:
+            result = search_project_vectors(
+                query=tool_input.query,
+                project_id_value=tool_input.project_id,
+                limit=tool_input.top_k,
+            )
+        except (RuntimeError, ValueError, VectorSearchError) as exc:
+            return ToolResult(
+                tool_name=self.config.name,
+                summary=f"Vector search failed: {exc}",
+                warnings=[f"vector_search failed: {exc}"],
+            )
+        evidence = [
+            RagEvidence(
+                evidence_type=f"vector_chunk:{match.chunk_type}",
+                source="vector",
+                file_path=match.file_path,
+                start_line=match.start_line,
+                end_line=match.end_line,
+                symbol=match.symbol_qualified_name or match.title,
+                score=match.score,
+                content_excerpt=match.content,
+                metadata={
+                    "chunk_id": match.chunk_id,
+                    "chunk_type": match.chunk_type,
+                    "title": match.title,
+                    "module_name": match.module_name,
+                    "service_name": match.service_name,
+                    "metadata": _json_safe(match.metadata),
+                },
+            )
+            for match in result.matches
+        ]
+        return ToolResult(
+            tool_name=self.config.name,
+            summary=(
+                f"Vector search query={tool_input.query!r}, "
+                f"model={result.embedding_model}, dim={result.embedding_dim} "
+                f"returned {len(evidence)} evidence items."
+            ),
+            evidence=evidence,
+        )
 
 
 @dataclass(frozen=True)
@@ -511,6 +563,8 @@ class SourceReadTool:
 
 def create_tool(config: ToolConfig) -> RagTool:
     """Create one tool from registration metadata."""
+    if config.name == "vector_search":
+        return VectorSearchTool(config)
     if config.name == "artifact_search":
         return ArtifactSearchTool(config)
     if config.name == "relation_search":
@@ -1143,6 +1197,10 @@ def _aggregate_by_spec(
     module = _optional_string(tool_input.filters.get("module"))
     path_contains = _optional_string(tool_input.filters.get("path_contains"))
     query = _expand_query_with_library(tool_input.query, tool_input)
+    term_weights = _library_term_weights(
+        tool_input.query,
+        tool_input.project_path,
+    )
     inferred_module = _infer_module(tool_input.evidence)
     output_limit = _limit(tool_input.top_k, multiplier=8)
     candidate_limit = max(_limit(tool_input.top_k, multiplier=25), spec.candidate_limit)
@@ -1182,7 +1240,12 @@ def _aggregate_by_spec(
             )
         ).all()
         rows = [(symbol, file_row) for symbol, file_row in row_results]
-        rows = _rank_aggregation_rows(rows, query, spec)[:output_limit]
+        rows = _rank_aggregation_rows(
+            rows,
+            query,
+            spec,
+            term_weights=term_weights,
+        )[:output_limit]
         fallback_evidence = []
         if spec.group_by == "table" and not rows and resolved_module:
             fallback_evidence = _module_scope_fallback(
@@ -1233,7 +1296,8 @@ def _aggregate_by_spec(
     return ToolResult(
         tool_name=config.name,
         summary=(
-            f"Aggregate {spec.group_by} query query={query!r}, "
+            f"Aggregate {spec.group_by} query query={tool_input.query!r}, "
+            f"library_expansion_applied={query != tool_input.query}, "
             f"module={module!r}, "
             f"resolved_module={resolved_module!r} returned "
             f"{len(evidence)} evidence items."
@@ -1263,13 +1327,21 @@ def _rank_aggregation_rows(
     rows: list[tuple[Symbol, File]],
     query: str,
     spec: AggregationSpecConfig,
+    term_weights: dict[str, int] | None = None,
 ) -> list[tuple[Symbol, File]]:
-    terms = [term.lower() for term in _prioritized_terms(_query_terms(query))[:40]]
+    weights = term_weights or {}
+    terms = _dedupe_lowered(_prioritized_terms(_query_terms(query)))[:40]
+    negative_terms = _negative_query_terms(query)
 
-    def rank(row: tuple[Symbol, File]) -> tuple[int, int, str, str]:
+    def rank(row: tuple[Symbol, File]) -> tuple[int, int, int, str, str]:
         symbol, file_row = row
         label_value = _aggregation_label_value(symbol, file_row, spec).lower()
         haystack = _aggregation_haystack(symbol, file_row, spec).lower()
+        negative_match = any(
+            _contains_normalized_term(haystack, term)
+            or _contains_normalized_term(label_value, term)
+            for term in negative_terms
+        )
         primary_match = any(
             _matches_primary_aggregation_name(label_value, term) for term in terms
         )
@@ -1283,11 +1355,51 @@ def _rank_aggregation_rows(
             priority = 5
         score = sum(
             _aggregation_term_score(term, haystack, label_value)
+            * weights.get(term, 1)
             for term in terms
         )
-        return (priority, -score, file_row.path, symbol.name)
+        return (
+            1 if negative_match else 0,
+            priority,
+            -score,
+            file_row.path,
+            symbol.name,
+        )
 
-    return sorted(rows, key=rank)
+    ranked_rows = sorted(rows, key=rank)
+    strong_hint_rows = _strong_hint_matched_rows(
+        ranked_rows,
+        spec,
+        term_weights=weights,
+    )
+    if strong_hint_rows:
+        return strong_hint_rows
+    return ranked_rows
+
+
+def _strong_hint_matched_rows(
+    rows: list[tuple[Symbol, File]],
+    spec: AggregationSpecConfig,
+    *,
+    term_weights: dict[str, int],
+) -> list[tuple[Symbol, File]]:
+    strong_terms = [
+        term
+        for term, weight in term_weights.items()
+        if weight >= 4 and len(term) >= 4
+    ]
+    if not strong_terms:
+        return []
+    matched: list[tuple[Symbol, File]] = []
+    for row in rows:
+        symbol, file_row = row
+        label_value = _aggregation_label_value(symbol, file_row, spec).lower()
+        if any(
+            _matches_primary_aggregation_name(label_value, term.lower())
+            for term in strong_terms
+        ):
+            matched.append(row)
+    return matched
 
 
 def _matches_primary_aggregation_name(name: str, term: str) -> bool:
@@ -1408,6 +1520,59 @@ def _aggregation_term_score(term: str, haystack: str, label_value: str) -> int:
     if term in haystack:
         return 20 + min(len(term), 20)
     return 0
+
+
+def _library_term_weights(query: str, project_path: Path | None) -> dict[str, int]:
+    weights: dict[str, int] = {}
+    lowered_query = query.lower()
+    for keyword, values in load_query_hints(project_path).items():
+        normalized_keyword = keyword.strip()
+        if not normalized_keyword:
+            continue
+        if normalized_keyword.lower() not in lowered_query:
+            continue
+        weight = max(2, min(len(normalized_keyword), 8))
+        for term in _library_weight_terms(normalized_keyword, values):
+            lowered_term = term.lower()
+            if not lowered_term:
+                continue
+            weights[lowered_term] = max(weights.get(lowered_term, 1), weight)
+    return weights
+
+
+def _negative_query_terms(query: str) -> list[str]:
+    terms: list[str] = []
+    for match in re.finditer(r"\bnot\s+([A-Za-z_][A-Za-z0-9_.$-]*)", query, re.I):
+        terms.append(match.group(1))
+    for match in re.finditer(r"不是\s*([A-Za-z_][A-Za-z0-9_.$-]*)", query):
+        terms.append(match.group(1))
+    return _dedupe_lowered(terms)
+
+
+def _contains_normalized_term(text: str, term: str) -> bool:
+    normalized_text = re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", text.lower())
+    normalized_term = re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", term.lower())
+    return bool(normalized_term and normalized_term in normalized_text)
+
+
+def _library_weight_terms(keyword: str, values: list[str]) -> list[str]:
+    terms = [keyword]
+    for value in values:
+        terms.extend(_library_value_weight_terms(value))
+    return _dedupe_terms(terms)
+
+
+def _library_value_weight_terms(value: str) -> list[str]:
+    cleaned = value.strip()
+    if not cleaned:
+        return []
+    terms = [cleaned]
+    for part in re.split(r"[,，、/\s]+", cleaned):
+        part = part.strip()
+        if not part:
+            continue
+        terms.append(part)
+    return terms
 
 
 def _module_scope_fallback(
@@ -2055,6 +2220,17 @@ def _dedupe_terms(terms: list[str]) -> list[str]:
     return result
 
 
+def _dedupe_lowered(terms: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for term in terms:
+        normalized = term.strip().lower()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
 def _dedupe(items: list[RagEvidence]) -> list[RagEvidence]:
     seen: set[tuple[str, str | None, int | None, str | None]] = set()
     result: list[RagEvidence] = []
@@ -2069,12 +2245,27 @@ def _dedupe(items: list[RagEvidence]) -> list[RagEvidence]:
 
 def _infer_module(evidence: list[RagEvidence]) -> str | None:
     for item in evidence:
+        if _is_library_evidence(item):
+            continue
         module = item.metadata.get("module_name")
         if isinstance(module, str) and module:
             return module
         if item.file_path and "/" in item.file_path:
             return item.file_path.split("/", 1)[0]
     return None
+
+
+def _is_library_evidence(item: RagEvidence) -> bool:
+    normalized_path = (item.file_path or "").replace("\\", "/")
+    if normalized_path == "library" or normalized_path.startswith("library/"):
+        return True
+    metadata = item.metadata.get("metadata")
+    if isinstance(metadata, dict):
+        chunk_type = metadata.get("chunk_type")
+        if chunk_type in {"project_knowledge", "project_knowledge_parent"}:
+            return True
+    chunk_type = item.metadata.get("chunk_type")
+    return chunk_type in {"project_knowledge", "project_knowledge_parent"}
 
 
 def _resolve_module(

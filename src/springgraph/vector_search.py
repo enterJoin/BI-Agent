@@ -6,7 +6,7 @@ from math import sqrt
 from pathlib import Path
 from typing import Any, cast
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -59,6 +59,8 @@ def search_project_vectors(
     project_id_value: str | None = None,
     project_path: str | Path | None = None,
     limit: int = 10,
+    chunk_types: list[str] | None = None,
+    artifact_types: list[str] | None = None,
 ) -> VectorSearchResult:
     """Search active chunk embeddings with the configured embedding provider."""
     normalized_query = query.strip()
@@ -72,6 +74,7 @@ def search_project_vectors(
     except RuntimeError as exc:
         raise VectorSearchError(str(exc)) from exc
     resolved_project_id = _resolve_project_id(project_id_value, project_path)
+    resolved_chunk_types = _resolve_chunk_types(chunk_types, artifact_types)
 
     with session_scope() as session:
         matches = search_vectors_with_session(
@@ -81,6 +84,7 @@ def search_project_vectors(
             embedding_dim=embedder.dimensions,
             project_id_value=resolved_project_id,
             limit=normalized_limit,
+            chunk_types=resolved_chunk_types,
         )
 
     return VectorSearchResult(
@@ -99,6 +103,7 @@ def search_vectors_with_session(
     embedding_dim: int,
     project_id_value: str | None = None,
     limit: int = 10,
+    chunk_types: list[str] | None = None,
 ) -> list[VectorSearchMatch]:
     """Search embeddings in an existing session."""
     normalized_limit = _normalize_limit(limit)
@@ -110,6 +115,7 @@ def search_vectors_with_session(
             embedding_dim=embedding_dim,
             project_id_value=project_id_value,
             limit=normalized_limit,
+            chunk_types=chunk_types,
         )
     except SQLAlchemyError:
         session.rollback()
@@ -121,6 +127,7 @@ def search_vectors_with_session(
                 embedding_dim=embedding_dim,
                 project_id_value=project_id_value,
                 limit=normalized_limit,
+                chunk_types=chunk_types,
             )
         except SQLAlchemyError as fallback_exc:
             raise VectorSearchError(
@@ -140,8 +147,10 @@ def _search_with_pgvector(
     embedding_dim: int,
     project_id_value: str | None,
     limit: int,
+    chunk_types: list[str] | None,
 ) -> list[VectorSearchMatch]:
     project_filter = ""
+    chunk_type_filter = ""
     params: dict[str, object] = {
         "embedding": _format_vector(query_embedding),
         "embedding_model": embedding_model,
@@ -151,9 +160,11 @@ def _search_with_pgvector(
     if project_id_value is not None:
         project_filter = "AND e.project_id = :project_id"
         params["project_id"] = project_id_value
+    if chunk_types:
+        chunk_type_filter = "AND c.chunk_type IN :chunk_types"
+        params["chunk_types"] = tuple(chunk_types)
 
-    rows = session.execute(
-        text(
+    statement = text(
             f"""
             WITH query_vector AS (
                 SELECT CAST(:embedding AS vector) AS embedding
@@ -183,10 +194,15 @@ def _search_with_pgvector(
               AND e.embedding_model = :embedding_model
               AND e.embedding_dim = :embedding_dim
               {project_filter}
+              {chunk_type_filter}
             ORDER BY e.embedding <=> query_vector.embedding
             LIMIT :limit
             """
-        ),
+    )
+    if chunk_types:
+        statement = statement.bindparams(bindparam("chunk_types", expanding=True))
+    rows = session.execute(
+        statement,
         params,
     ).mappings()
     return [_match_from_row(cast(Mapping[str, Any], row)) for row in rows]
@@ -199,8 +215,10 @@ def _search_with_python_fallback(
     embedding_dim: int,
     project_id_value: str | None,
     limit: int,
+    chunk_types: list[str] | None,
 ) -> list[VectorSearchMatch]:
     project_filter = ""
+    chunk_type_filter = ""
     params: dict[str, object] = {
         "embedding_model": embedding_model,
         "embedding_dim": embedding_dim,
@@ -209,38 +227,45 @@ def _search_with_python_fallback(
     if project_id_value is not None:
         project_filter = "AND e.project_id = :project_id"
         params["project_id"] = project_id_value
+    if chunk_types:
+        chunk_type_filter = "AND c.chunk_type IN :chunk_types"
+        params["chunk_types"] = tuple(chunk_types)
 
+    statement = text(
+        f"""
+        SELECT
+            c.id AS chunk_id,
+            e.project_id AS project_id,
+            f.path AS file_path,
+            c.title AS title,
+            c.chunk_type AS chunk_type,
+            c.content AS content,
+            c.language AS language,
+            c.start_line AS start_line,
+            c.end_line AS end_line,
+            f.module_name AS module_name,
+            f.service_name AS service_name,
+            s.qualified_name AS symbol_qualified_name,
+            c.metadata AS metadata,
+            e.embedding::text AS embedding_text
+        FROM chunk_embeddings e
+        JOIN code_chunks c ON c.id = e.chunk_id
+        JOIN files f ON f.id = c.file_id
+        LEFT JOIN symbols s ON s.id = c.symbol_id
+        WHERE e.status = 'active'
+          AND c.status = 'active'
+          AND e.embedding_model = :embedding_model
+          AND e.embedding_dim = :embedding_dim
+          {project_filter}
+          {chunk_type_filter}
+        LIMIT :candidate_limit
+        """
+    )
+    if chunk_types:
+        statement = statement.bindparams(bindparam("chunk_types", expanding=True))
     rows = list(
         session.execute(
-            text(
-                f"""
-                SELECT
-                    c.id AS chunk_id,
-                    e.project_id AS project_id,
-                    f.path AS file_path,
-                    c.title AS title,
-                    c.chunk_type AS chunk_type,
-                    c.content AS content,
-                    c.language AS language,
-                    c.start_line AS start_line,
-                    c.end_line AS end_line,
-                    f.module_name AS module_name,
-                    f.service_name AS service_name,
-                    s.qualified_name AS symbol_qualified_name,
-                    c.metadata AS metadata,
-                    e.embedding::text AS embedding_text
-                FROM chunk_embeddings e
-                JOIN code_chunks c ON c.id = e.chunk_id
-                JOIN files f ON f.id = c.file_id
-                LEFT JOIN symbols s ON s.id = c.symbol_id
-                WHERE e.status = 'active'
-                  AND c.status = 'active'
-                  AND e.embedding_model = :embedding_model
-                  AND e.embedding_dim = :embedding_dim
-                  {project_filter}
-                LIMIT :candidate_limit
-                """
-            ),
+            statement,
             params,
         ).mappings()
     )
@@ -301,6 +326,28 @@ def _resolve_project_id(
 
 def _normalize_limit(limit: int) -> int:
     return max(1, min(limit, MAX_LIMIT))
+
+
+def _resolve_chunk_types(
+    chunk_types: list[str] | None,
+    artifact_types: list[str] | None,
+) -> list[str] | None:
+    resolved: list[str] = []
+    for chunk_type in chunk_types or []:
+        normalized = chunk_type.strip()
+        if normalized and normalized not in resolved:
+            resolved.append(normalized)
+    for artifact_type in artifact_types or []:
+        normalized = artifact_type.strip()
+        if not normalized:
+            continue
+        chunk_type = (
+            normalized if normalized.startswith("artifact_")
+            else f"artifact_{normalized}"
+        )
+        if chunk_type not in resolved:
+            resolved.append(chunk_type)
+    return resolved or None
 
 
 def _format_vector(vector: list[float]) -> str:

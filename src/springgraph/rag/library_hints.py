@@ -7,7 +7,9 @@ from typing import Any
 import yaml
 
 LIBRARY_DIR_NAME = "library"
-_MARKDOWN_HINT_RE = re.compile(r"^\s*(?:[-*]\s*)?(.+?)\s*(?:=>|->|:)\s*(.+?)\s*$")
+_MARKDOWN_HINT_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?(.+?)\s*(?:=>|->|:|：|≈)\s*(.+?)\s*$"
+)
 _SUPPORTED_SUFFIXES = {".yml", ".yaml", ".md", ".markdown"}
 
 
@@ -81,11 +83,26 @@ def _coerce_values(raw_value: object) -> list[str]:
 
 
 def _split_values(raw_value: str) -> list[str]:
-    return [
+    values = [
         cleaned
-        for item in re.split(r"[,，、\s]+", raw_value)
+        for item in re.split(r"[,，、/\s]+", raw_value)
         if (cleaned := _clean_token(item))
     ]
+    return _preserve_negative_phrases(values)
+
+
+def _preserve_negative_phrases(values: list[str]) -> list[str]:
+    result: list[str] = []
+    index = 0
+    while index < len(values):
+        value = values[index]
+        if value.lower() == "not" and index + 1 < len(values):
+            result.append(f"not {values[index + 1]}")
+            index += 2
+            continue
+        result.append(value)
+        index += 1
+    return result
 
 
 def _merge_hints(

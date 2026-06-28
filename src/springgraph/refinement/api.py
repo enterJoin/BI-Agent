@@ -19,6 +19,10 @@ from springgraph.refinement._library import (
 )
 from springgraph.refinement._repository import RefinementRepository, merge_facts
 from springgraph.refinement._scanner import scan_refinement_files
+from springgraph.refinement._typed_artifacts import (
+    TYPED_ARTIFACT_TEMPLATE_VERSION,
+    build_typed_artifact_chunks,
+)
 from springgraph.refinement._types import (
     EdgeFact,
     RefinedFile,
@@ -217,6 +221,36 @@ def _refine_with_session(root: Path, session: Session) -> RefinementResult:
         symbols_upserted,
         edges_upserted,
         len(key_to_id),
+        perf_counter() - stage_started_at,
+    )
+
+    stage_started_at = perf_counter()
+    rebuild_all_typed_artifacts = not repository.typed_artifact_chunks_exist(
+        TYPED_ARTIFACT_TEMPLATE_VERSION
+    )
+    deleted_typed_chunks = (
+        repository.delete_typed_artifact_chunks() if rebuild_all_typed_artifacts else 0
+    )
+    typed_file_ids = None if rebuild_all_typed_artifacts else set(changed_file_ids)
+    typed_chunks = build_typed_artifact_chunks(
+        session,
+        project_id_value,
+        file_ids=typed_file_ids,
+        current_paths=current_paths,
+    )
+    if typed_chunks:
+        facts = RefinementFacts(
+            symbols=facts.symbols,
+            edges=facts.edges,
+            chunks=[*facts.chunks, *typed_chunks],
+        )
+    logger.info(
+        "Typed artifact chunks generated: project_id=%s, chunks=%s, "
+        "mode=%s, deleted_existing=%s, elapsed_seconds=%.3f",
+        project_id_value,
+        len(typed_chunks),
+        "full" if rebuild_all_typed_artifacts else "incremental",
+        deleted_typed_chunks,
         perf_counter() - stage_started_at,
     )
 

@@ -197,6 +197,27 @@ class RefinementRepository:
             )
         )
 
+    def typed_artifact_chunks_exist(self, template_version: str) -> bool:
+        """Return whether typed artifact vector chunks exist for this project."""
+        row = self.session.execute(
+            select(CodeChunk.id)
+            .where(CodeChunk.project_id == self.project_id)
+            .where(CodeChunk.chunk_type.like("artifact_%"))
+            .where(CodeChunk.template_version == template_version)
+            .limit(1)
+        ).first()
+        return row is not None
+
+    def delete_typed_artifact_chunks(self) -> int:
+        """Delete generated typed artifact chunks for this project."""
+        result = self.session.execute(
+            delete(CodeChunk).where(
+                CodeChunk.project_id == self.project_id,
+                CodeChunk.chunk_type.like("artifact_%"),
+            )
+        )
+        return int(getattr(result, "rowcount", 0) or 0)
+
     def upsert_facts(
         self, facts: RefinementFacts, file_ids: dict[str, str]
     ) -> tuple[int, int, dict[str, str]]:
@@ -336,6 +357,8 @@ class RefinementRepository:
             symbol_id_value = None
             if chunk.symbol_key is not None:
                 symbol_id_value = key_to_id.get(chunk.symbol_key)
+            elif isinstance(chunk.metadata.get("symbol_id"), str):
+                symbol_id_value = str(chunk.metadata["symbol_id"])
             values: dict[str, Any] = {
                 "id": chunk_id,
                 "project_id": self.project_id,

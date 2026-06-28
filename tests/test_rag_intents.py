@@ -1,6 +1,7 @@
 from springgraph.rag import query_resolver
 from springgraph.rag.agent import planner
 from springgraph.rag.agent.planner import (
+    apply_entrypoint_lookup_defaults,
     apply_intent_defaults,
     apply_task_planning_defaults,
 )
@@ -12,6 +13,7 @@ from springgraph.rag.config.loader import (
     load_task_planning_config,
 )
 from springgraph.rag.intent import infer_query_intent, intent_default_filters
+from springgraph.rag.schemas import RagEvidence
 from springgraph.rag.target_trace import trace_target_tokens
 
 
@@ -264,6 +266,121 @@ def test_apply_intent_defaults_promotes_explicit_target_to_trace() -> None:
         "direction": "incoming",
         "edge_kinds": ["writes_table", "defines_contract"],
     }
+
+
+def test_job_lookup_defaults_preserve_original_question_for_hints() -> None:
+    question = (
+        "\u8bf7\u95ee\u5e7f\u70b9\u901a\u4e5d\u56fe\u7d20\u6750"
+        "\u6d88\u8017\u6570\u636e\u662f\u901a\u8fc7\u54ea\u4e2aJob"
+        "\u5165\u5e93\u7684"
+    )
+    understanding: QuestionUnderstanding = {
+        "task_goal": "find job",
+        "intent": "persistence_location",
+    }
+    plan: RetrievalPlan = {
+        "task_goal": "find job",
+        "steps": [
+            {
+                "tool_name": "aggregate_query",
+                "query": "\u5e7f\u70b9\u901a\u4e5d\u56fe\u7d20\u6750",
+                "filters": {},
+            }
+        ],
+    }
+
+    updated = apply_entrypoint_lookup_defaults(plan, understanding, question)
+
+    assert [step["tool_name"] for step in updated["steps"]] == [
+        "vector_search",
+        "aggregate_query",
+    ]
+    assert updated["steps"][1]["query"] == question
+    assert "\u6d88\u8017\u6570\u636e" in updated["steps"][1]["query"]
+    assert updated["steps"][1]["filters"] == {
+        "intent": "persistence_location",
+        "group_by": "job",
+    }
+
+
+def test_job_lookup_defaults_drop_unneeded_execution_trace() -> None:
+    question = (
+        "\u8bf7\u95ee\u5e7f\u70b9\u901a\u521b\u610f\u548c\u5e7f\u544a"
+        "\u6570\u636e\u662f\u901a\u8fc7\u54ea\u4e2aJob\u5165\u5e93\u7684"
+    )
+    understanding: QuestionUnderstanding = {
+        "task_goal": "find job",
+        "intent": "persistence_location",
+    }
+    plan: RetrievalPlan = {
+        "task_goal": "find job",
+        "steps": [
+            {
+                "tool_name": "execution_trace",
+                "query": question,
+                "filters": {"intent": "execution_flow"},
+            },
+            {
+                "tool_name": "aggregate_query",
+                "query": question,
+                "filters": {},
+            },
+        ],
+    }
+
+    updated = apply_entrypoint_lookup_defaults(plan, understanding, question)
+
+    assert [step["tool_name"] for step in updated["steps"]] == [
+        "vector_search",
+        "aggregate_query",
+    ]
+
+
+def test_vector_evidence_summary_is_semantic_context_only() -> None:
+    summary = planner._evidence_summary(
+        [
+            RagEvidence(
+                evidence_type="vector_chunk:project_knowledge",
+                source="vector",
+                file_path="library/keywords.md",
+                content_excerpt=(
+                    "广点通广告数据入库 => adCreativeInfoV3Handler / "
+                    "syncAdV3 / ad_sync"
+                ),
+            )
+        ]
+    )
+
+    assert "semantic_context_only=true" in summary
+    assert "not as typed artifact candidates" in summary
+
+
+def test_vector_evidence_summary_omits_hint_details_with_typed_evidence() -> None:
+    summary = planner._evidence_summary(
+        [
+            RagEvidence(
+                evidence_type="vector_chunk:project_knowledge",
+                source="vector",
+                file_path="library/keywords.md",
+                content_excerpt=(
+                    "广点通广告数据入库 => adCreativeInfoV3Handler / "
+                    "syncAdV3 / ad_sync"
+                ),
+            ),
+            RagEvidence(
+                evidence_type="job_entrypoint",
+                source="aggregate",
+                file_path="src/main/java/TencentDataInfoJob.java",
+                start_line=137,
+                symbol="annotation_usage:XxlJob:adCreativeInfoV3Handler",
+                content_excerpt="job=adCreativeInfoV3Handler",
+            ),
+        ]
+    )
+
+    assert "details omitted" in summary
+    assert "syncAdV3" not in summary
+    assert "job=adCreativeInfoV3Handler" in summary
 
 
 def test_apply_task_planning_defaults_adds_configured_tool_chain() -> None:

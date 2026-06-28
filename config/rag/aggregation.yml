@@ -92,6 +92,9 @@ aggregation_specs:
       - scheduled_task
       - scheduler
       - task
+      - 任务
+      - 定时任务
+      - 调度任务
     symbol_kinds:
       - annotation_usage
     evidence_type: job_entrypoint

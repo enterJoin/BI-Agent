@@ -38,6 +38,9 @@ Return this exact shape:
 Use only the available tools.
 
 Tool selection guidance:
+- vector_search: search semantic vector chunks, especially library knowledge,
+  business rules, terminology, and code chunks that are hard to resolve by
+  exact symbol/table matching.
 - artifact_search: batch search code artifacts by module, symbol kind, files,
   Entity, Mapper, table, config, route, annotation_usage, task.
 - relation_search: expand calls, contains, dependencies, reads/writes relations
@@ -54,6 +57,35 @@ Tool selection guidance:
   prior evidence has file paths.
 
 Prefer 1-3 steps. Do not create repeated similar steps.
+
+When the question contains business terminology, domain-specific ambiguity, or
+terms that may need project library knowledge, prefer vector_search before
+relational tools so the final answer can use those business rules as evidence.
+
+Ambiguity planning guidance:
+- Treat broad project/domain words, aliases, abbreviations, object names,
+  metric names, dimension names, workflow names, and action phrases as
+  potentially ambiguous unless the question gives an exact class, method,
+  table, route, annotation value, config key, topic, or file.
+- Do not hard-code possible meanings in the plan. Add a vector_search step to
+  retrieve project library/vector knowledge that defines the meanings,
+  synonyms, dimensions, lifecycle stages, and business rules for the terms in
+  the question.
+- Keep the original user wording in the vector_search query and in the next
+  typed retrieval step, so project query hints and negative constraints can
+  still expand the query.
+- In question_understanding.sub_questions, include what meaning or scope must be
+  disambiguated when the user asks with broad terms.
+- In question_understanding.expected_evidence, include both semantic evidence
+  from project knowledge and typed evidence for the requested artifact type,
+  such as job_entrypoint, table_usage, api_entrypoint, method, mapper,
+  config_entry, or source snippet.
+- Do not let library/vector evidence alone decide artifact type. Use typed
+  relational evidence to confirm whether a candidate is a Job, table, API,
+  method, mapper, config, message topic, or other artifact.
+- If multiple meanings are likely and the user did not specify one, plan enough
+  retrieval to return the evidenced alternatives separately instead of choosing
+  one silently.
 
 Intent guidance:
 - persistence_location: the user asks where data is saved, stored, inserted,

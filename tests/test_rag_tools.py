@@ -15,6 +15,7 @@ from springgraph.rag.tools.implementations import (
     TargetTraceTool,
 )
 from springgraph.rag.tools.schemas import ToolInput, ToolResult
+from springgraph.refinement import _extractors
 
 
 def test_aggregate_query_treats_store_question_as_table_query(
@@ -190,11 +191,75 @@ def test_execution_target_candidates_drop_bare_entrypoint_suffix() -> None:
     assert "Handler" not in candidates
 
 
+def test_insert_sql_does_not_treat_duplicate_update_columns_as_tables() -> None:
+    sql = """
+        INSERT INTO nine_image_mapping
+        (component_id, image_id, nine_order, file_id, images_md5)
+        VALUES
+        (?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+        file_id = VALUES(file_id),
+        images_md5 = VALUES(images_md5)
+    """
+
+    assert _extractors._tables_from_sql(sql, "insert") == [
+        ("writes_table", "nine_image_mapping")
+    ]
+
+
 def test_job_name_is_job_aggregation_alias() -> None:
     spec = implementations._aggregation_spec_for("job_name")
 
     assert spec is not None
     assert spec.group_by == "job"
+
+
+def test_rank_aggregation_rows_filters_to_strong_hint_match() -> None:
+    spec = implementations._aggregation_spec_for("job")
+    assert spec is not None
+    file_row = File(
+        id="file-1",
+        project_id="project-1",
+        path="bijobserv/src/main/java/TencentDataInfoJob.java",
+        module_name="bijobserv",
+        service_name="bijobserv",
+        language="java",
+        content_hash="hash",
+        size_bytes=1,
+    )
+    exact_job = Symbol(
+        id="job-1",
+        project_id="project-1",
+        file_id="file-1",
+        kind="annotation_usage",
+        name="@XxlJob adCreativeInfoV3Handler",
+        qualified_name="annotation_usage:XxlJob:adCreativeInfoV3Handler",
+        start_line=10,
+        end_line=10,
+        meta={"values": {"value": "adCreativeInfoV3Handler"}},
+    )
+    related_job = Symbol(
+        id="job-2",
+        project_id="project-1",
+        file_id="file-1",
+        kind="annotation_usage",
+        name="@XxlJob huaweiSyncAdCreativeHandler",
+        qualified_name="annotation_usage:XxlJob:huaweiSyncAdCreativeHandler",
+        start_line=20,
+        end_line=20,
+        meta={"values": {"value": "huaweiSyncAdCreativeHandler"}},
+    )
+
+    ranked = implementations._rank_aggregation_rows(
+        [(related_job, file_row), (exact_job, file_row)],
+        "广告创意数据 adCreativeInfoV3Handler creative",
+        spec,
+        term_weights={"adcreativeinfov3handler": 8, "creative": 8},
+    )
+
+    assert [symbol.name for symbol, _ in ranked] == [
+        "@XxlJob adCreativeInfoV3Handler"
+    ]
 
 
 def test_aggregation_config_covers_known_symbol_kinds() -> None:
@@ -620,6 +685,44 @@ def test_aggregate_tables_keeps_local_table_results_without_fallback(
 
     assert [item.evidence_type for item in result.evidence] == ["table_usage"]
     assert result.evidence[0].metadata["table"] == "ums_member"
+
+
+def test_infer_module_ignores_library_vector_evidence() -> None:
+    evidence = [
+        RagEvidence(
+            evidence_type="vector_chunk:project_knowledge",
+            source="vector",
+            file_path="library/03-reporting-and-data-sources.md",
+            metadata={
+                "module_name": "library",
+                "metadata": {"chunk_type": "project_knowledge"},
+            },
+        ),
+        RagEvidence(
+            evidence_type="method",
+            source="aggregate",
+            file_path="bijobserv/src/main/java/com/demo/Job.java",
+            metadata={"module_name": "bijobserv"},
+        ),
+    ]
+
+    assert implementations._infer_module(evidence) == "bijobserv"
+
+
+def test_infer_module_returns_none_for_only_library_evidence() -> None:
+    evidence = [
+        RagEvidence(
+            evidence_type="vector_chunk:project_knowledge_parent",
+            source="vector",
+            file_path="library/关键词.md",
+            metadata={
+                "module_name": "library",
+                "metadata": {"chunk_type": "project_knowledge_parent"},
+            },
+        )
+    ]
+
+    assert implementations._infer_module(evidence) is None
 
 
 def test_aggregate_tables_adds_module_fallback_when_local_tables_empty(

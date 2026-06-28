@@ -94,6 +94,14 @@ class VectorSearchRequest(BaseModel):
     )
     title: str | None = None
     limit: int = Field(default=10, ge=1, le=100)
+    chunk_types: list[str] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("chunk_types", "chunkTypes"),
+    )
+    artifact_types: list[str] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("artifact_types", "artifactTypes"),
+    )
 
 
 class VectorSearchMatchResponse(BaseModel):
@@ -369,6 +377,8 @@ def create_app() -> FastAPI:
                 project_id_value=request_model.project_id,
                 project_path=request_model.project_path,
                 limit=request_model.limit,
+                chunk_types=request_model.chunk_types,
+                artifact_types=request_model.artifact_types,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

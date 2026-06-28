@@ -28,9 +28,19 @@ Resolution rules:
 - Use recent conversation only to resolve pronouns, ellipsis, and follow-up
   questions such as "详细过程是什么", "它怎么执行", "这个查了哪些表", "继续",
   "刚才那个 Job 调了哪些接口".
+- If the current question corrects or rejects the previous answer, such as
+  "不是...", "不对", "回答错了", "应该是...", "而是...", or explains why the
+  previous target is wrong, treat it as a correction. Use the original user
+  question plus the new constraints to form a fresh retrieval question. Do not
+  carry the rejected assistant target into resolved_target, and do not rewrite
+  the correction as a detailed process question unless the current question
+  explicitly asks for process/details.
 - Do not inject old targets into unrelated new questions.
 - Do not invent targets that are absent from the current question or recent
   conversation.
+- For correction feedback, prefer retrieval that can find alternative evidence,
+  such as aggregate_query or artifact_search, instead of execution_trace for the
+  rejected target.
 - If the current question asks for detailed process, execution steps, called
   interfaces, table reads/writes, inserted data, return/continue conditions, or
   branch behavior, set retrieval_intent to execution_flow and prefer

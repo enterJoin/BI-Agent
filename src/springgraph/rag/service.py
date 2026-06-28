@@ -251,7 +251,7 @@ def _answer_from_state(
         intent=intent,
         rewritten_query=rewritten_query,
         expanded_queries=expanded_queries,
-        used_vector_search=False,
+        used_vector_search="vector_search" in final_state.get("used_tools", []),
         used_relational_search=bool(
             {
                 "artifact_search",

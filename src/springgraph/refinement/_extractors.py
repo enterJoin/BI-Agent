@@ -63,9 +63,13 @@ SQL_TABLE_PATTERNS = {
         re.compile(r"\bfrom\s+`?(?P<table>[A-Za-z_][\w.]*)`?", re.IGNORECASE),
         re.compile(r"\bjoin\s+`?(?P<table>[A-Za-z_][\w.]*)`?", re.IGNORECASE),
     ],
-    "writes_table": [
+    "insert_table": [
         re.compile(r"\binsert\s+into\s+`?(?P<table>[A-Za-z_][\w.]*)`?", re.IGNORECASE),
+    ],
+    "update_table": [
         re.compile(r"\bupdate\s+`?(?P<table>[A-Za-z_][\w.]*)`?", re.IGNORECASE),
+    ],
+    "delete_table": [
         re.compile(r"\bdelete\s+from\s+`?(?P<table>[A-Za-z_][\w.]*)`?", re.IGNORECASE),
     ],
 }
@@ -1087,8 +1091,12 @@ def _tables_from_sql(sql_text: str, operation: str) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     if operation == "select":
         patterns = SQL_TABLE_PATTERNS["reads_table"]
-    elif operation in {"insert", "update", "delete"}:
-        patterns = SQL_TABLE_PATTERNS["writes_table"]
+    elif operation == "insert":
+        patterns = SQL_TABLE_PATTERNS["insert_table"]
+    elif operation == "update":
+        patterns = SQL_TABLE_PATTERNS["update_table"]
+    elif operation == "delete":
+        patterns = SQL_TABLE_PATTERNS["delete_table"]
     else:
         patterns = []
     for pattern in patterns:

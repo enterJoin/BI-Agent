@@ -1,4 +1,14 @@
 tools:
+  - name: vector_search
+    description: "检索向量库中的项目知识、library 文档和代码语义 chunk，用于获取业务规则、术语解释和语义相关源码线索。"
+    capabilities:
+      - semantic_search
+      - library_knowledge
+      - business_rule_lookup
+      - vector_retrieval
+    requires:
+      - project_id
+
   - name: artifact_search
     description: "按模块、文件、符号类型、业务词或代码词批量查找代码制品，包括类、方法、配置、Entity、Mapper、表、字段、XML、SQL。"
     capabilities:

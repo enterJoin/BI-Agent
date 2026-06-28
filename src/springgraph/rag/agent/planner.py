@@ -10,6 +10,7 @@ from springgraph.rag.agent.state import (
     RetrievalPlan,
 )
 from springgraph.rag.config.loader import (
+    load_aggregation_specs,
     load_execution_trace_config,
     load_intent_configs,
 )
@@ -66,6 +67,11 @@ def plan_question_retrieval(
         question=question,
         source_available=source_available,
     )
+    plan = apply_entrypoint_lookup_defaults(
+        plan=plan,
+        understanding=understanding,
+        question=question,
+    )
     plan = apply_task_planning_defaults(
         plan=plan,
         understanding=understanding,
@@ -104,6 +110,50 @@ def apply_execution_trace_defaults(
         )
     if understanding.get("intent") in {"unknown", ""}:
         understanding["intent"] = "execution_flow"
+    return {**plan, "steps": steps}
+
+
+def apply_entrypoint_lookup_defaults(
+    plan: RetrievalPlan,
+    understanding: QuestionUnderstanding,
+    question: str,
+) -> RetrievalPlan:
+    """Prefer entrypoint aggregation for questions asking which job persists data."""
+    if not _looks_like_job_persistence_lookup(question):
+        return plan
+    steps = [
+        step
+        for step in plan.get("steps", [])
+        if step.get("tool_name")
+        not in {"target_trace", "source_read", "execution_trace"}
+    ]
+    vector_step: PlanStep = {
+        "tool_name": "vector_search",
+        "query": question,
+        "filters": {"intent": "business_rule_lookup"},
+        "reason": "Retrieve project library business rules before ranking jobs.",
+    }
+    job_step: PlanStep = {
+        "tool_name": "aggregate_query",
+        "query": question,
+        "filters": {
+            "intent": "persistence_location",
+            "group_by": "job",
+        },
+        "reason": "Find scheduled job entrypoints related to data persistence.",
+    }
+    if _has_tool_step(steps, "aggregate_query"):
+        steps = [
+            _merge_job_lookup_filters(step, question)
+            if step.get("tool_name") == "aggregate_query"
+            else step
+            for step in steps
+        ]
+    else:
+        steps.insert(0, job_step)
+    if not _has_tool_step(steps, "vector_search"):
+        steps.insert(0, vector_step)
+    understanding["intent"] = "persistence_location"
     return {**plan, "steps": steps}
 
 
@@ -302,6 +352,41 @@ def _has_tool_step(steps: list[PlanStep], tool_name: str) -> bool:
     return any(step.get("tool_name") == tool_name for step in steps)
 
 
+def _merge_job_lookup_filters(step: PlanStep, question: str) -> PlanStep:
+    return {
+        **step,
+        "query": question,
+        "filters": {
+            **dict(step.get("filters", {})),
+            "intent": "persistence_location",
+            "group_by": "job",
+        },
+    }
+
+
+def _looks_like_job_persistence_lookup(question: str) -> bool:
+    intent_configs = load_intent_configs()
+    intent = infer_query_intent(
+        query=question,
+        explicit_intent=None,
+        group_by=None,
+        intent_configs=intent_configs,
+    )
+    if intent != "persistence_location":
+        return False
+    lowered = question.lower()
+    return any(term and term.lower() in lowered for term in _job_lookup_terms())
+
+
+def _job_lookup_terms() -> list[str]:
+    terms: list[str] = []
+    for spec in load_aggregation_specs():
+        if spec.group_by != "job":
+            continue
+        terms.extend([spec.group_by, *spec.aliases, *spec.annotation_names])
+    return terms
+
+
 def _looks_like_execution_trace_question(question: str) -> bool:
     config = load_execution_trace_config()
     lowered = question.lower()
@@ -363,6 +448,7 @@ def _task_planning_guidance(understanding: QuestionUnderstanding) -> str:
 
 def _evidence_summary(evidence: list[RagEvidence]) -> str:
     lines: list[str] = []
+    typed_evidence_available = any(item.source != "vector" for item in evidence)
     for index, item in enumerate(evidence, start=1):
         location = item.file_path or "unknown"
         if item.start_line is not None:
@@ -372,7 +458,16 @@ def _evidence_summary(evidence: list[RagEvidence]) -> str:
         route_details = _route_details(item)
         if route_details:
             details = f"{details}; {route_details}" if details else route_details
-        detail_limit = 1600 if item.source == "execution_trace" else 280
+        if item.source == "execution_trace":
+            detail_limit = 1600
+        elif item.source == "vector":
+            detail_limit = 1400
+            details = _semantic_context_details(
+                details,
+                typed_evidence_available=typed_evidence_available,
+            )
+        else:
+            detail_limit = 280
         if len(details) > detail_limit:
             details = f"{details[: detail_limit - 3]}..."
         lines.append(
@@ -380,6 +475,29 @@ def _evidence_summary(evidence: list[RagEvidence]) -> str:
             f"{item.symbol or ''} at {location}; {details}"
         )
     return "\n".join(lines) if lines else "No evidence yet."
+
+
+def _semantic_context_details(
+    details: str,
+    *,
+    typed_evidence_available: bool,
+) -> str:
+    prefix = (
+        "semantic_context_only=true; use this as terminology/business-rule "
+        "context, not as typed artifact candidates"
+    )
+    if typed_evidence_available:
+        return (
+            f"{prefix}; details omitted because typed relational evidence is "
+            "available for artifact candidates."
+        )
+    if not details:
+        return (
+            f"{prefix}."
+        )
+    return (
+        f"{prefix}; {details}"
+    )
 
 
 def _snippet_summary(snippets: list[SourceSnippet]) -> str:
