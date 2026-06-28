@@ -3,7 +3,7 @@
 from typing import Any, TypedDict
 
 from springgraph.rag.config.models import AgenticRagConfig, ToolConfig
-from springgraph.rag.query_resolver import QueryResolution
+from springgraph.rag.query_resolver import ContextConstraints, QueryResolution
 from springgraph.rag.schemas import RagEvidence, SourceSnippet
 from springgraph.rag.tools.schemas import ToolResult
 
@@ -19,6 +19,8 @@ class QuestionUnderstanding(TypedDict, total=False):
     entities: list[str]
     expected_evidence: list[str]
     rewritten_query: str
+    context_mode: str
+    hard_constraints: ContextConstraints
 
 
 class PlanStep(TypedDict, total=False):
@@ -35,6 +37,8 @@ class RetrievalPlan(TypedDict, total=False):
 
     task_goal: str
     steps: list[PlanStep]
+    hard_constraints: ContextConstraints
+    soft_context: dict[str, object]
 
 
 class AgenticRagState(TypedDict, total=False):

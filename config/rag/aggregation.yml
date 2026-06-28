@@ -440,6 +440,26 @@ aggregation_specs:
       - name
     candidate_limit: 300
 
+  - group_by: mq_tag
+    aliases:
+      - mq_tag
+      - mq_tags
+      - message_tag
+      - message_tags
+      - rocket_tag
+      - rocket_tags
+      - tag
+      - tags
+    symbol_kinds:
+      - mq_tag
+    evidence_type: mq_tag_entry
+    label: mq_tag
+    metadata_label_paths:
+      - tag
+      - topic
+      - name
+    candidate_limit: 300
+
   - group_by: mq_queue
     aliases:
       - mq_queue

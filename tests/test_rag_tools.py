@@ -191,6 +191,174 @@ def test_execution_target_candidates_drop_bare_entrypoint_suffix() -> None:
     assert "Handler" not in candidates
 
 
+def test_execution_target_candidates_use_explicit_targets_only() -> None:
+    candidates = implementations._execution_target_candidates(
+        "materialReportHandler kafka topic messages",
+        {"targets": ["materialReportHandler"]},
+    )
+
+    assert candidates == ["materialReportHandler"]
+
+
+def test_source_read_returns_source_snippet_evidence(tmp_path: Path) -> None:
+    source_path = tmp_path / "src/main/java/demo/Flow.java"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("class Flow {\n  void run() {}\n}\n", encoding="utf-8")
+    tool = implementations.SourceReadTool(
+        ToolConfig(name="source_read", description="read source")
+    )
+
+    result = tool.invoke(
+        ToolInput(
+            query="read source",
+            filters={},
+            project_id="project-1",
+            project_path=tmp_path,
+            top_k=5,
+            graph_depth=1,
+            source_available=True,
+            max_source_files=2,
+            max_source_lines=20,
+            source_line_padding=0,
+            evidence=[
+                RagEvidence(
+                    evidence_type="execution_method",
+                    source="execution_trace",
+                    file_path="src/main/java/demo/Flow.java",
+                    start_line=1,
+                    end_line=3,
+                    metadata={"evidence_scope": "hard"},
+                )
+            ],
+        )
+    )
+
+    assert result.source_snippets
+    assert result.evidence[0].evidence_type == "source_snippet"
+    assert result.evidence[0].metadata["evidence_scope"] == "hard"
+
+
+def test_execution_message_evidence_resolves_topic_variable() -> None:
+    file_row = File(
+        id="file-flow",
+        project_id="project-1",
+        path="src/main/java/demo/Flow.java",
+        module_name="demo",
+        service_name="demo",
+        language="java",
+        content_hash="hash",
+        size_bytes=1,
+    )
+    symbol = Symbol(
+        id="method-run",
+        project_id="project-1",
+        file_id="file-flow",
+        kind="method",
+        name="run",
+        qualified_name="demo.Flow.run",
+        start_line=10,
+        end_line=14,
+    )
+    source = implementations._MethodSource(
+        symbol=symbol,
+        file_row=file_row,
+        start_line=10,
+        end_line=14,
+        content="\n".join(
+            [
+                "void run() {",
+                "  String topic = BIConstants.MATERIAL_REPORT_TOPIC;",
+                "  kafkaService.send(topic, payload);",
+                "}",
+            ]
+        ),
+    )
+
+    evidence = implementations._execution_message_evidence([source])
+
+    assert evidence[0].evidence_type == "execution_message:publishes"
+    assert evidence[0].metadata["topic"] == "BIConstants.MATERIAL_REPORT_TOPIC"
+
+
+def test_execution_message_evidence_resolves_rocket_topic_tag() -> None:
+    file_row = File(
+        id="file-flow",
+        project_id="project-1",
+        path="src/main/java/demo/Flow.java",
+        module_name="demo",
+        service_name="demo",
+        language="java",
+        content_hash="hash",
+        size_bytes=1,
+    )
+    symbol = Symbol(
+        id="method-run",
+        project_id="project-1",
+        file_id="file-flow",
+        kind="method",
+        name="run",
+        qualified_name="demo.Flow.run",
+        start_line=10,
+        end_line=14,
+    )
+    source = implementations._MethodSource(
+        symbol=symbol,
+        file_row=file_row,
+        start_line=10,
+        end_line=14,
+        content="\n".join(
+            [
+                "void run() {",
+                '  rocketMQTemplate.syncSend("order-topic:paid", payload);',
+                "}",
+            ]
+        ),
+    )
+
+    evidence = implementations._execution_message_evidence([source])
+
+    assert evidence[0].evidence_type == "execution_message:publishes"
+    assert evidence[0].metadata["topic"] == "order-topic"
+    assert evidence[0].metadata["tag"] == "paid"
+
+
+def test_same_class_method_names_include_method_ref_target() -> None:
+    file_row = File(
+        id="file-flow",
+        project_id="project-1",
+        path="src/main/java/demo/Flow.java",
+        module_name="demo",
+        service_name="demo",
+        language="java",
+        content_hash="hash",
+        size_bytes=1,
+    )
+    symbol = Symbol(
+        id="method-run",
+        project_id="project-1",
+        file_id="file-flow",
+        kind="method",
+        name="run",
+        qualified_name="demo.Flow.run",
+        start_line=10,
+        end_line=14,
+    )
+    source = implementations._MethodSource(
+        symbol=symbol,
+        file_row=file_row,
+        start_line=10,
+        end_line=14,
+        content="items.forEach(this::syncV3Report);",
+    )
+    method_names = implementations._called_method_names([source])
+
+    assert "syncV3Report" in method_names
+    assert "demo.Flow.syncV3Report" in implementations._same_class_method_names(
+        [source],
+        method_names,
+    )
+
+
 def test_insert_sql_does_not_treat_duplicate_update_columns_as_tables() -> None:
     sql = """
         INSERT INTO nine_image_mapping
@@ -288,6 +456,7 @@ def test_aggregation_config_covers_known_symbol_kinds() -> None:
         "method",
         "mq_exchange",
         "mq_queue",
+        "mq_tag",
         "mq_topic",
         "oauth_provider",
         "package",

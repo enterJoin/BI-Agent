@@ -37,6 +37,19 @@ Return this exact shape:
 
 Use only the available tools.
 
+Context constraint guidance:
+- The input may include Context resolution from the query resolver.
+- If context_mode is object_followup and hard_constraints.targets is non-empty,
+  treat those targets as the current turn's hard scope. Prefer execution_trace
+  or target_trace with filters.targets set to those target names. Evidence for
+  final conclusions must be reachable from those targets when
+  evidence_must_be_reachable_from_targets is true.
+- Other semantic/vector/global retrieval may still be useful as soft context,
+  but it must not replace the target-reachable evidence.
+- If context_mode is topic_expansion, use soft_context as retrieval wording but
+  do not restrict tools to prior objects.
+- If context_mode is new_topic, do not inherit prior hard constraints.
+
 Tool selection guidance:
 - vector_search: search semantic vector chunks, especially library knowledge,
   business rules, terminology, and code chunks that are hard to resolve by

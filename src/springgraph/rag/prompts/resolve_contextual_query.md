@@ -10,11 +10,28 @@ Return this exact shape:
   "is_follow_up": true,
   "needs_context": true,
   "needs_clarification": false,
+  "context_mode": "object_followup|topic_expansion|new_topic",
   "resolved_target": {
     "type": "job|method|class|table|api|service|unknown",
     "name": "target name or empty string",
     "source": "current_question|history|none",
     "confidence": 0.0
+  },
+  "resolved_targets": [
+    {
+      "type": "job|method|class|table|api|service|unknown",
+      "name": "target name",
+      "source": "current_question|history",
+      "confidence": 0.0
+    }
+  ],
+  "hard_constraints": {
+    "targets": [],
+    "scope": "none|target_call_chain",
+    "evidence_must_be_reachable_from_targets": false
+  },
+  "soft_context": {
+    "topic": "topic words from current/history when useful"
   },
   "rewritten_question": "standalone retrieval question",
   "retrieval_intent": "execution_flow|table_usage|api_entrypoint|persistence_location|config_lookup|business_qna|unknown",
@@ -36,6 +53,17 @@ Resolution rules:
   the correction as a detailed process question unless the current question
   explicitly asks for process/details.
 - Do not inject old targets into unrelated new questions.
+- Set context_mode:
+  - object_followup when the current question asks more about concrete prior
+    objects such as "this Job", "these two jobs", "it", "those tables", or
+    "the method above". Put all resolved objects in resolved_targets and
+    hard_constraints.targets. Use scope "target_call_chain" when the answer
+    must be verified from those objects' reachable call/execution evidence.
+  - topic_expansion when the current question expands the same business topic
+    but asks for more/global related items, such as "other jobs", "all related
+    tables", or "the whole design". Put the topic in soft_context and do not
+    add hard_constraints.targets.
+  - new_topic when the current question is independent.
 - Do not invent targets that are absent from the current question or recent
   conversation.
 - For correction feedback, prefer retrieval that can find alternative evidence,

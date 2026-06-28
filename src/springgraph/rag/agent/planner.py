@@ -18,6 +18,7 @@ from springgraph.rag.config.models import IntentConfig, ToolConfig
 from springgraph.rag.intent import infer_query_intent, intent_default_filters
 from springgraph.rag.llm import invoke_agent_model
 from springgraph.rag.prompts.loader import load_prompt
+from springgraph.rag.query_resolver import ContextConstraints, QueryResolution
 from springgraph.rag.schemas import RagEvidence, SourceSnippet
 from springgraph.rag.target_trace import (
     explicit_trace_target,
@@ -37,6 +38,7 @@ def plan_question_retrieval(
     available_tools: list[ToolConfig],
     source_available: bool,
     memory_observations: list[str],
+    query_resolution: QueryResolution | None = None,
 ) -> tuple[QuestionUnderstanding, RetrievalPlan]:
     """Ask the LLM to understand the question and create one retrieval plan."""
     prompt = "\n\n".join(
@@ -47,6 +49,8 @@ def plan_question_retrieval(
             f"Source reading allowed by request: {source_available}",
             "Thread memory observations:\n"
             f"{json.dumps(memory_observations, ensure_ascii=False)}",
+            "Context resolution:\n"
+            f"{json.dumps(query_resolution or {}, ensure_ascii=False)}",
         ]
     )
     payload = _invoke_json(prompt)
@@ -59,6 +63,7 @@ def plan_question_retrieval(
     understanding = _normalize_understanding(understanding_payload, question)
     if looks_like_task_planning(question):
         understanding["intent"] = task_planning_intent_name()
+    _apply_resolution_understanding(understanding, query_resolution)
     plan = _normalize_plan(plan_payload, understanding, question)
     plan = apply_intent_defaults(plan, understanding, load_intent_configs())
     plan = apply_execution_trace_defaults(
@@ -78,7 +83,127 @@ def plan_question_retrieval(
         question=question,
         source_available=source_available,
     )
+    plan = apply_context_constraints(
+        plan=plan,
+        question=question,
+        source_available=source_available,
+        query_resolution=query_resolution,
+    )
     return understanding, plan
+
+
+def apply_context_constraints(
+    plan: RetrievalPlan,
+    question: str,
+    source_available: bool,
+    query_resolution: QueryResolution | None,
+) -> RetrievalPlan:
+    """Apply per-turn hard/soft context constraints to planned retrieval."""
+    hard_constraints = _hard_constraints(query_resolution)
+    soft_context = _soft_context(query_resolution)
+    if not hard_constraints.get("targets"):
+        return {
+            **plan,
+            "hard_constraints": hard_constraints,
+            "soft_context": soft_context,
+        }
+
+    target_names = _constraint_target_names(hard_constraints)
+    steps = [
+        _apply_constraint_to_step(step, target_names)
+        for step in plan.get("steps", [])
+    ]
+    if source_available and not _has_tool_step(steps, "execution_trace"):
+        steps.insert(
+            0,
+            {
+                "tool_name": "execution_trace",
+                "query": question,
+                "filters": {
+                    "targets": target_names,
+                    "constraint_scope": "hard",
+                    "intent": "execution_flow",
+                },
+                "reason": (
+                    "Trace the resolved follow-up targets and use only their "
+                    "reachable execution/table evidence for hard conclusions."
+                ),
+            },
+        )
+    return {
+        **plan,
+        "steps": steps,
+        "hard_constraints": hard_constraints,
+        "soft_context": soft_context,
+    }
+
+
+def _apply_resolution_understanding(
+    understanding: QuestionUnderstanding,
+    query_resolution: QueryResolution | None,
+) -> None:
+    if not query_resolution:
+        return
+    context_mode = query_resolution.get("context_mode")
+    if context_mode:
+        understanding["context_mode"] = context_mode
+    hard_constraints = _hard_constraints(query_resolution)
+    if hard_constraints.get("targets"):
+        understanding["hard_constraints"] = hard_constraints
+
+
+def _hard_constraints(
+    query_resolution: QueryResolution | None,
+) -> ContextConstraints:
+    if not query_resolution:
+        return {
+            "targets": [],
+            "scope": "none",
+            "evidence_must_be_reachable_from_targets": False,
+        }
+    constraints = query_resolution.get("hard_constraints", {})
+    if not isinstance(constraints, dict):
+        constraints = {}
+    targets = constraints.get("targets")
+    if not isinstance(targets, list):
+        targets = []
+    return {
+        "targets": [
+            target for target in targets
+            if isinstance(target, dict) and str(target.get("name", "")).strip()
+        ],
+        "scope": _string(constraints.get("scope"), "none"),
+        "evidence_must_be_reachable_from_targets": bool(
+            constraints.get("evidence_must_be_reachable_from_targets", False)
+        ),
+    }
+
+
+def _soft_context(query_resolution: QueryResolution | None) -> dict[str, object]:
+    if not query_resolution:
+        return {}
+    value = query_resolution.get("soft_context", {})
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _constraint_target_names(constraints: ContextConstraints) -> list[str]:
+    names: list[str] = []
+    for target in constraints.get("targets", []):
+        name = str(target.get("name", "")).strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _apply_constraint_to_step(step: PlanStep, target_names: list[str]) -> PlanStep:
+    filters = dict(step.get("filters", {}))
+    tool_name = step.get("tool_name", "")
+    if tool_name in {"execution_trace", "target_trace"}:
+        filters["targets"] = target_names
+        filters["constraint_scope"] = "hard"
+    else:
+        filters.setdefault("constraint_scope", "soft_context")
+    return {**step, "filters": filters}
 
 
 def apply_execution_trace_defaults(
@@ -283,6 +408,7 @@ def build_final_prompt(
     observations: list[str],
     conversation_history: list[dict[str, str]],
     source_reading_skipped_reason: str | None,
+    hard_constraints: ContextConstraints | dict[str, object],
 ) -> str:
     """Build the final answer prompt."""
     return "\n\n".join(
@@ -290,6 +416,8 @@ def build_final_prompt(
             load_prompt("final_answer.md"),
             f"Current question:\n{question}",
             f"Question understanding:\n{json.dumps(understanding, ensure_ascii=False)}",
+            "Hard constraints for this turn:\n"
+            f"{json.dumps(hard_constraints, ensure_ascii=False)}",
             f"Tool observations:\n{json.dumps(observations, ensure_ascii=False)}",
             f"Evidence:\n{_evidence_summary(evidence)}",
             f"Source snippets:\n{_snippet_summary(source_snippets)}",
@@ -470,11 +598,21 @@ def _evidence_summary(evidence: list[RagEvidence]) -> str:
             detail_limit = 280
         if len(details) > detail_limit:
             details = f"{details[: detail_limit - 3]}..."
+        scope = _evidence_scope(item)
         lines.append(
-            f"{index}. [{item.source}/{item.evidence_type}] "
+            f"{index}. [{scope}][{item.source}/{item.evidence_type}] "
             f"{item.symbol or ''} at {location}; {details}"
         )
     return "\n".join(lines) if lines else "No evidence yet."
+
+
+def _evidence_scope(item: RagEvidence) -> str:
+    value = item.metadata.get("evidence_scope")
+    if value == "hard":
+        return "HARD"
+    if value == "soft":
+        return "SOFT"
+    return "UNSCOPED"
 
 
 def _semantic_context_details(

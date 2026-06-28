@@ -1,4 +1,4 @@
-from springgraph.rag import query_resolver
+﻿from springgraph.rag import query_resolver
 from springgraph.rag.agent import planner
 from springgraph.rag.agent.planner import (
     apply_entrypoint_lookup_defaults,
@@ -12,6 +12,7 @@ from springgraph.rag.config.loader import (
     load_target_trace_config,
     load_task_planning_config,
 )
+from springgraph.rag.config.models import ToolConfig
 from springgraph.rag.intent import infer_query_intent, intent_default_filters
 from springgraph.rag.schemas import RagEvidence
 from springgraph.rag.target_trace import trace_target_tokens
@@ -91,7 +92,10 @@ def test_query_resolver_carries_recent_job_target(
     monkeypatch.setattr(query_resolver, "_invoke_json", fake_invoke_json)
 
     resolution = query_resolver.resolve_contextual_query(
-        question="\u8be6\u7ec6\u8fc7\u7a0b\u662f\u4ec0\u4e48",
+        question=(
+            "\u8fd9\u4e24\u4e2ajob\u7684\u7d20\u6750\u62a5\u8868"
+            "\u6570\u636e\u90fd\u5165\u4e86\u54ea\u4e2a\u8868\uff1f"
+        ),
         conversation_history=[
             {
                 "role": "user",
@@ -121,6 +125,80 @@ def test_query_resolver_carries_recent_job_target(
     assert resolution["preferred_tools"] == ["execution_trace"]
 
 
+def test_query_resolver_supports_multi_target_hard_constraints(
+    monkeypatch: object,
+) -> None:
+    def fake_invoke_json(prompt: str) -> dict[str, object]:
+        return {
+            "is_follow_up": True,
+            "needs_context": True,
+            "needs_clarification": False,
+            "context_mode": "object_followup",
+            "resolved_targets": [
+                {
+                    "type": "job",
+                    "name": "tencentMaterialReportHandler",
+                    "source": "history",
+                    "confidence": 0.95,
+                },
+                {
+                    "type": "job",
+                    "name": "materialReportHandler",
+                    "source": "history",
+                    "confidence": 0.9,
+                },
+            ],
+            "hard_constraints": {
+                "targets": [
+                    {
+                        "type": "job",
+                        "name": "tencentMaterialReportHandler",
+                    },
+                    {
+                        "type": "job",
+                        "name": "materialReportHandler",
+                    },
+                ],
+                "scope": "target_call_chain",
+                "evidence_must_be_reachable_from_targets": True,
+            },
+            "rewritten_question": (
+                "tencentMaterialReportHandler and materialReportHandler "
+                "target material report tables"
+            ),
+            "retrieval_intent": "table_usage",
+            "preferred_tools": ["execution_trace"],
+            "reason": "resolved both jobs from history",
+        }
+
+    monkeypatch.setattr(query_resolver, "_invoke_json", fake_invoke_json)
+
+    resolution = query_resolver.resolve_contextual_query(
+        question=(
+            "\u8fd9\u4e24\u4e2ajob\u7684\u7d20\u6750\u62a5\u8868"
+            "\u6570\u636e\u90fd\u5165\u4e86\u54ea\u4e2a\u8868\uff1f"
+        ),
+        conversation_history=[
+            {
+                "role": "assistant",
+                "content": (
+                    "through tencentMaterialReportHandler and "
+                    "materialReportHandler."
+                ),
+            }
+        ],
+    )
+
+    assert resolution["context_mode"] == "object_followup"
+    assert [
+        target["name"] for target in resolution["hard_constraints"]["targets"]
+    ] == ["tencentMaterialReportHandler", "materialReportHandler"]
+    assert (
+        resolution["hard_constraints"]["evidence_must_be_reachable_from_targets"]
+        is True
+    )
+
+
 def test_query_resolver_returns_default_without_history() -> None:
     resolution = query_resolver.resolve_contextual_query(
         "\u8ba2\u5355\u670d\u52a1\u6709\u54ea\u4e9bHTTP\u63a5\u53e3",
@@ -131,6 +209,66 @@ def test_query_resolver_returns_default_without_history() -> None:
         "\u8ba2\u5355\u670d\u52a1\u6709\u54ea\u4e9bHTTP\u63a5\u53e3"
     )
     assert resolution["is_follow_up"] is False
+
+
+def test_context_constraints_force_execution_trace_targets(
+    monkeypatch: object,
+) -> None:
+    def fake_invoke_json(prompt: str) -> dict[str, object]:
+        return {
+            "question_understanding": {
+                "task_goal": "find target job tables",
+                "intent": "table_usage",
+            },
+            "retrieval_plan": {
+                "task_goal": "find target job tables",
+                "steps": [
+                    {
+                        "tool_name": "aggregate_query",
+                        "query": "material report tables",
+                        "filters": {
+                            "intent": "table_usage",
+                            "group_by": "table_name",
+                        },
+                        "reason": "broad table aggregation",
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setattr(planner, "_invoke_json", fake_invoke_json)
+
+    _, plan = planner.plan_question_retrieval(
+        question=(
+            "tencentMaterialReportHandler and materialReportHandler target tables"
+        ),
+        available_tools=[
+            ToolConfig(name="execution_trace", description="trace execution"),
+            ToolConfig(name="aggregate_query", description="aggregate evidence"),
+        ],
+        source_available=True,
+        memory_observations=[],
+        query_resolution={
+            "context_mode": "object_followup",
+            "hard_constraints": {
+                "targets": [
+                    {"type": "job", "name": "tencentMaterialReportHandler"},
+                    {"type": "job", "name": "materialReportHandler"},
+                ],
+                "scope": "target_call_chain",
+                "evidence_must_be_reachable_from_targets": True,
+            },
+        },
+    )
+
+    steps = plan["steps"]
+    assert steps[0]["tool_name"] == "execution_trace"
+    assert steps[0]["filters"]["targets"] == [
+        "tencentMaterialReportHandler",
+        "materialReportHandler",
+    ]
+    assert steps[0]["filters"]["constraint_scope"] == "hard"
+    assert steps[1]["filters"]["constraint_scope"] == "soft_context"
 
 
 def test_task_planning_config_drives_default_steps() -> None:
@@ -344,7 +482,7 @@ def test_vector_evidence_summary_is_semantic_context_only() -> None:
                 source="vector",
                 file_path="library/keywords.md",
                 content_excerpt=(
-                    "广点通广告数据入库 => adCreativeInfoV3Handler / "
+                    "骞跨偣閫氬箍鍛婃暟鎹叆搴?=> adCreativeInfoV3Handler / "
                     "syncAdV3 / ad_sync"
                 ),
             )
@@ -363,7 +501,7 @@ def test_vector_evidence_summary_omits_hint_details_with_typed_evidence() -> Non
                 source="vector",
                 file_path="library/keywords.md",
                 content_excerpt=(
-                    "广点通广告数据入库 => adCreativeInfoV3Handler / "
+                    "骞跨偣閫氬箍鍛婃暟鎹叆搴?=> adCreativeInfoV3Handler / "
                     "syncAdV3 / ad_sync"
                 ),
             ),

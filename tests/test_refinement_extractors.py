@@ -54,6 +54,43 @@ def test_extracts_table_mapper_sql_and_oauth_facts() -> None:
     assert all("should-not-leak" not in chunk.content for chunk in merged.chunks)
 
 
+def test_extracts_message_topic_and_rocket_tag_facts(tmp_path: Path) -> None:
+    source_path = tmp_path / "MessagePublisher.java"
+    source_path.write_text(
+        "\n".join(
+            [
+                "class MessagePublisher {",
+                "  void send() {",
+                "    String topic = BIConstants.MATERIAL_REPORT_TOPIC;",
+                "    kafkaService.send(topic, payload);",
+                "    rocketMQTemplate.syncSend(\"order-topic:paid\", payload);",
+                "  }",
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    facts = extract_file_facts(
+        source_path,
+        "src/main/java/demo/MessagePublisher.java",
+        "java",
+        "demo",
+        "demo",
+    )
+    symbol_names = {symbol.qualified_name for symbol in facts.symbols}
+    edges = {(edge.target_key, edge.kind) for edge in facts.edges}
+
+    assert "mq_topic:BIConstants.MATERIAL_REPORT_TOPIC" in symbol_names
+    assert "mq_topic:order-topic" in symbol_names
+    assert "mq_tag:order-topic:paid" in symbol_names
+    assert (
+        "mq_topic:BIConstants.MATERIAL_REPORT_TOPIC",
+        "publishes",
+    ) in edges
+    assert ("mq_topic:order-topic", "publishes") in edges
+
+
 def test_hash_embedder_returns_1024_dimensions() -> None:
     vector = HashEmbedder().embed("orders read oms_order and oauth provider gitee")
     assert len(vector) == 1024

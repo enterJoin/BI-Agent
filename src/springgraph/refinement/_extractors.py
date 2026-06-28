@@ -35,6 +35,17 @@ RABBIT_SEND_RE = re.compile(
     r'(?P<exchange>"[^"]+"|[A-Z][A-Z0-9_\.]*)\s*,\s*'
     r'(?P<routing>"[^"]+"|[A-Z][A-Z0-9_\.]*)'
 )
+KAFKA_SEND_RE = re.compile(
+    r"\b(?:kafkaService|kafkaTemplate)\.send\s*\(\s*(?P<topic>[^,\n)]+)"
+)
+ROCKET_SEND_RE = re.compile(
+    r"\brocketMQTemplate\."
+    r"(?:syncSend|asyncSend|sendOneWay|convertAndSend|sendMessageInTransaction)"
+    r"\s*\(\s*(?P<destination>[^,\n)]+)"
+)
+JAVA_ASSIGNMENT_RE = re.compile(
+    r"\b(?:String\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>[^;]+);"
+)
 REDIS_LITERAL_RE = re.compile(
     r"(?:redisTemplate|stringRedisTemplate)\.[A-Za-z0-9_().]+"
     r"\(\s*\"(?P<key>[^\"]+)\""
@@ -598,6 +609,7 @@ def _extract_java_messaging(
     chunks: list[ChunkFact],
 ) -> None:
     service_key = _service_key(service_name)
+    assignments = _java_assignments(source)
     for match in RABBIT_LISTENER_RE.finditer(source):
         queue = match.group("queue")
         line = _line_for_offset(source, match.start())
@@ -642,6 +654,38 @@ def _extract_java_messaging(
             )
         )
         chunks.append(_mq_chunk(relative_path, mq_key, "publishes", target, line))
+    for match in KAFKA_SEND_RE.finditer(source):
+        line = _line_for_offset(source, match.start())
+        for topic in _resolve_java_values(match.group("topic"), assignments):
+            _add_topic_publish(
+                symbols=symbols,
+                edges=edges,
+                chunks=chunks,
+                source_key=service_key,
+                relative_path=relative_path,
+                topic=topic,
+                tag=None,
+                line=line,
+                source="kafka_send",
+            )
+    for match in ROCKET_SEND_RE.finditer(source):
+        line = _line_for_offset(source, match.start())
+        for destination in _resolve_java_values(
+            match.group("destination"),
+            assignments,
+        ):
+            topic, tag = _topic_and_tag(destination)
+            _add_topic_publish(
+                symbols=symbols,
+                edges=edges,
+                chunks=chunks,
+                source_key=service_key,
+                relative_path=relative_path,
+                topic=topic,
+                tag=tag,
+                line=line,
+                source="rocketmq_send",
+            )
 
 
 def _extract_java_cache(
@@ -938,6 +982,7 @@ def _mq_symbol(
     kind: str,
     name: str,
     line: int,
+    **metadata: object,
 ) -> str:
     key = f"{kind}:{name}"
     symbols.append(
@@ -950,10 +995,134 @@ def _mq_symbol(
             language="java",
             start_line=line,
             end_line=line,
-            metadata={"name": name},
+            metadata={"name": name} | metadata,
         )
     )
     return key
+
+
+def _add_topic_publish(
+    *,
+    symbols: list[SymbolFact],
+    edges: list[EdgeFact],
+    chunks: list[ChunkFact],
+    source_key: str,
+    relative_path: str,
+    topic: str,
+    tag: str | None,
+    line: int,
+    source: str,
+) -> None:
+    if not topic:
+        return
+    topic_key = _mq_symbol(
+        symbols,
+        relative_path,
+        "mq_topic",
+        topic,
+        line,
+        topic=topic,
+        tag=tag,
+        source=source,
+    )
+    edges.append(
+        EdgeFact(
+            source_key=source_key,
+            target_key=topic_key,
+            kind="publishes",
+            line=line,
+            metadata={"topic": topic, "tag": tag, "source": source},
+        )
+    )
+    chunks.append(
+        _mq_chunk(
+            relative_path,
+            topic_key,
+            "publishes",
+            _topic_label(topic, tag),
+            line,
+        )
+    )
+    if tag:
+        tag_key = _mq_symbol(
+            symbols,
+            relative_path,
+            "mq_tag",
+            f"{topic}:{tag}",
+            line,
+            topic=topic,
+            tag=tag,
+            source=source,
+        )
+        edges.append(
+            EdgeFact(
+                source_key=topic_key,
+                target_key=tag_key,
+                kind="publishes",
+                line=line,
+                metadata={"topic": topic, "tag": tag, "source": source},
+            )
+        )
+        chunks.append(
+            _mq_chunk(
+                relative_path,
+                tag_key,
+                "publishes",
+                _topic_label(topic, tag),
+                line,
+            )
+        )
+
+
+def _java_assignments(source: str) -> dict[str, list[str]]:
+    assignments: dict[str, list[str]] = {}
+    for match in JAVA_ASSIGNMENT_RE.finditer(source):
+        name = match.group("name")
+        value = _clean_java_value(match.group("value"))
+        if not name or not value:
+            continue
+        assignments.setdefault(name, []).append(value)
+    return assignments
+
+
+def _resolve_java_values(
+    expression: str,
+    assignments: dict[str, list[str]],
+) -> list[str]:
+    value = _clean_java_value(expression)
+    if value in assignments:
+        return _dedupe_strings(assignments[value])
+    return [value] if value else []
+
+
+def _topic_and_tag(destination: str) -> tuple[str, str | None]:
+    value = _clean_java_value(destination)
+    if ":" in value and "://" not in value:
+        topic, tag = value.split(":", maxsplit=1)
+        return (_clean_java_value(topic), _clean_java_value(tag) or None)
+    if '":"' in value or '":" ' in value or '"+' in value:
+        parts = [
+            _clean_java_value(part)
+            for part in re.split(r'\+\s*":\"\s*\+|\+\s*":"\s*\+', value)
+        ]
+        if len(parts) == 2 and parts[0] and parts[1]:
+            return (parts[0], parts[1])
+    return (value, None)
+
+
+def _topic_label(topic: str, tag: str | None) -> str:
+    return f"{topic}:{tag}" if tag else topic
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def _cache_symbol(

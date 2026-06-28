@@ -131,8 +131,10 @@ def test_resolved_contextual_question_is_used_for_planning(
         available_tools: list[object],
         source_available: bool,
         memory_observations: list[str],
+        query_resolution: dict[str, object] | None = None,
     ) -> tuple[dict[str, object], dict[str, object]]:
         calls["planner_question"] = question
+        calls["query_resolution"] = query_resolution
         return (
             {"task_goal": "trace", "intent": "execution_flow"},
             {"task_goal": "trace", "steps": []},

@@ -28,6 +28,7 @@ _DIRECT_KIND_TO_ARTIFACT_TYPE = {
     "mapper": "mapper",
     "mq_exchange": "mq_exchange",
     "mq_queue": "mq_queue",
+    "mq_tag": "mq_tag",
     "mq_topic": "mq_topic",
     "oauth_provider": "oauth_provider",
     "permission_rule": "permission_rule",

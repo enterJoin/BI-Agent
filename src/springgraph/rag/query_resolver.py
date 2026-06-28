@@ -16,13 +16,25 @@ class ResolvedTarget(TypedDict, total=False):
     confidence: float
 
 
+class ContextConstraints(TypedDict, total=False):
+    """Structured constraints derived from current question and context."""
+
+    targets: list[ResolvedTarget]
+    scope: str
+    evidence_must_be_reachable_from_targets: bool
+
+
 class QueryResolution(TypedDict, total=False):
     """Structured contextual query resolution."""
 
     is_follow_up: bool
     needs_context: bool
     needs_clarification: bool
+    context_mode: str
     resolved_target: ResolvedTarget
+    resolved_targets: list[ResolvedTarget]
+    hard_constraints: ContextConstraints
+    soft_context: dict[str, object]
     rewritten_question: str
     retrieval_intent: str
     preferred_tools: list[str]
@@ -54,12 +66,20 @@ def _default_resolution(question: str) -> QueryResolution:
         "is_follow_up": False,
         "needs_context": False,
         "needs_clarification": False,
+        "context_mode": "new_topic",
         "resolved_target": {
             "type": "unknown",
             "name": "",
             "source": "none",
             "confidence": 0.0,
         },
+        "resolved_targets": [],
+        "hard_constraints": {
+            "targets": [],
+            "scope": "none",
+            "evidence_must_be_reachable_from_targets": False,
+        },
+        "soft_context": {},
         "rewritten_question": question,
         "retrieval_intent": "unknown",
         "preferred_tools": [],
@@ -73,22 +93,90 @@ def _normalize_resolution(
 ) -> QueryResolution:
     raw_target = payload.get("resolved_target")
     target_payload = raw_target if isinstance(raw_target, dict) else {}
+    resolved_target = _normalize_target(target_payload)
+    resolved_targets = _normalize_targets(payload.get("resolved_targets"))
+    if not resolved_targets and resolved_target.get("name"):
+        resolved_targets = [resolved_target]
+    context_mode = _context_mode(payload.get("context_mode"))
+    hard_constraints = _normalize_constraints(
+        payload.get("hard_constraints"),
+        fallback_targets=resolved_targets,
+        context_mode=context_mode,
+    )
     rewritten_question = _string(payload.get("rewritten_question"), fallback_question)
     return {
         "is_follow_up": bool(payload.get("is_follow_up", False)),
         "needs_context": bool(payload.get("needs_context", False)),
         "needs_clarification": bool(payload.get("needs_clarification", False)),
-        "resolved_target": {
-            "type": _string(target_payload.get("type"), "unknown"),
-            "name": _string(target_payload.get("name"), ""),
-            "source": _string(target_payload.get("source"), "none"),
-            "confidence": _float_value(target_payload.get("confidence"), 0.0),
-        },
+        "context_mode": context_mode,
+        "resolved_target": resolved_target,
+        "resolved_targets": resolved_targets,
+        "hard_constraints": hard_constraints,
+        "soft_context": _mapping(payload.get("soft_context")),
         "rewritten_question": rewritten_question,
         "retrieval_intent": _string(payload.get("retrieval_intent"), "unknown"),
         "preferred_tools": _string_list(payload.get("preferred_tools")),
         "reason": _string(payload.get("reason"), ""),
     }
+
+
+def _normalize_target(payload: dict[str, object]) -> ResolvedTarget:
+    return {
+        "type": _string(payload.get("type"), "unknown"),
+        "name": _string(payload.get("name"), ""),
+        "source": _string(payload.get("source"), "none"),
+        "confidence": _float_value(payload.get("confidence"), 0.0),
+    }
+
+
+def _normalize_targets(value: object) -> list[ResolvedTarget]:
+    if not isinstance(value, list):
+        return []
+    targets = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        target = _normalize_target(item)
+        if target.get("name"):
+            targets.append(target)
+    return targets
+
+
+def _normalize_constraints(
+    value: object,
+    *,
+    fallback_targets: list[ResolvedTarget],
+    context_mode: str,
+) -> ContextConstraints:
+    payload = value if isinstance(value, dict) else {}
+    targets = _normalize_targets(payload.get("targets"))
+    if not targets and context_mode == "object_followup":
+        targets = fallback_targets
+    scope = _string(payload.get("scope"), "target_call_chain")
+    if context_mode != "object_followup":
+        scope = "none"
+        targets = []
+    return {
+        "targets": targets,
+        "scope": scope,
+        "evidence_must_be_reachable_from_targets": bool(
+            targets
+            and payload.get("evidence_must_be_reachable_from_targets", True)
+        ),
+    }
+
+
+def _context_mode(value: object) -> str:
+    if not isinstance(value, str):
+        return "new_topic"
+    mode = value.strip()
+    if mode in {"object_followup", "topic_expansion", "new_topic"}:
+        return mode
+    return "new_topic"
+
+
+def _mapping(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def _conversation_history_summary(messages: list[dict[str, str]]) -> str:

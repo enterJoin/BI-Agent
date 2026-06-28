@@ -1,10 +1,11 @@
 """Node implementations for the planned Agentic RAG graph."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from springgraph.rag.agent import planner
-from springgraph.rag.agent.state import AgenticRagState, PlanStep
+from springgraph.rag.agent.state import AgenticRagState, PlanStep, RetrievalPlan
 from springgraph.rag.config.loader import load_agentic_rag_config
 from springgraph.rag.llm import invoke_agent_model
 from springgraph.rag.memory.store import get_thread, update_thread
@@ -84,6 +85,7 @@ def plan_retrieval(state: AgenticRagState) -> AgenticRagState:
         available_tools=state["tool_configs"],
         source_available=state.get("source_available", False),
         memory_observations=state.get("observations", []),
+        query_resolution=state.get("query_resolution"),
     )
     if question_for_planning != state["question"]:
         understanding["rewritten_query"] = question_for_planning
@@ -140,12 +142,17 @@ def execute_retrieval_plan(state: AgenticRagState) -> AgenticRagState:
             continue
         evidence = _source_read_evidence_for_step(state, tool_name)
         result = tool.invoke(_tool_input(state, step, evidence=evidence))
+        result_evidence = _mark_result_evidence(
+            result.evidence,
+            tool_name=tool_name,
+            plan=state.get("retrieval_plan", {}),
+        )
         state["tool_results"].append(result)
         state["used_tools"].append(result.tool_name)
         state["observations"].append(result.summary)
         state["warnings"] = [*state.get("warnings", []), *result.warnings]
         state["evidence"] = _dedupe_evidence(
-            [*state.get("evidence", []), *result.evidence]
+            [*state.get("evidence", []), *result_evidence]
         )
         state["source_snippets"] = _dedupe_source_snippets(
             [*state.get("source_snippets", []), *result.source_snippets]
@@ -171,12 +178,20 @@ def execute_retrieval_plan(state: AgenticRagState) -> AgenticRagState:
                     evidence=_prioritized_source_evidence(state.get("evidence", [])),
                 )
             )
+            result_evidence = _mark_result_evidence(
+                result.evidence,
+                tool_name="source_read",
+                plan=state.get("retrieval_plan", {}),
+            )
             state["tool_results"].append(result)
             state["used_tools"].append(result.tool_name)
             state["observations"].append(
                 f"Auto source_read after target_trace: {result.summary}"
             )
             state["warnings"] = [*state.get("warnings", []), *result.warnings]
+            state["evidence"] = _dedupe_evidence(
+                [*state.get("evidence", []), *result_evidence]
+            )
             state["source_snippets"] = _dedupe_source_snippets(
                 [*state.get("source_snippets", []), *result.source_snippets]
             )
@@ -207,6 +222,7 @@ def generate_final_answer(state: AgenticRagState) -> AgenticRagState:
         observations=state.get("observations", []),
         conversation_history=state.get("conversation_history", []),
         source_reading_skipped_reason=state.get("source_reading_skipped_reason"),
+        hard_constraints=state.get("retrieval_plan", {}).get("hard_constraints", {}),
     )
     state["answer"] = invoke_agent_model(prompt)
     return state
@@ -257,6 +273,37 @@ def _source_read_evidence_for_step(
     if intent != "task_planning":
         return None
     return _prioritized_task_planning_source_evidence(state.get("evidence", []))
+
+
+def _mark_result_evidence(
+    evidence: list[RagEvidence],
+    *,
+    tool_name: str,
+    plan: RetrievalPlan,
+) -> list[RagEvidence]:
+    constraints = plan.get("hard_constraints", {})
+    has_hard_constraints = bool(
+        isinstance(constraints, dict) and constraints.get("targets")
+    )
+    if not has_hard_constraints:
+        return evidence
+    scope = "hard" if tool_name in {"execution_trace", "target_trace"} else "soft"
+    reason = (
+        "satisfies_current_turn_hard_constraint"
+        if scope == "hard"
+        else "context_or_global_retrieval_not_target_reachable"
+    )
+    return [
+        replace(
+            item,
+            metadata={
+                **item.metadata,
+                "evidence_scope": item.metadata.get("evidence_scope", scope),
+                "evidence_scope_reason": reason,
+            },
+        )
+        for item in evidence
+    ]
 
 
 def _has_file_evidence(evidence: list[RagEvidence]) -> bool:

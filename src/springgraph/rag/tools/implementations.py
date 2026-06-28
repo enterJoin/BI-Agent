@@ -76,10 +76,21 @@ _JAVA_CALL_RE = re.compile(
     r"\b(?P<receiver>[A-Za-z_][A-Za-z0-9_]*)\.(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\("
 )
 _JAVA_METHOD_REF_RE = re.compile(
-    r"\b(?:this|[A-Za-z_][A-Za-z0-9_]*)::"
+    r"\b(?P<receiver>this|[A-Za-z_][A-Za-z0-9_]*)::"
     r"(?P<method>[A-Za-z_][A-Za-z0-9_]*)"
 )
 _JAVA_LOCAL_CALL_RE = re.compile(r"\b(?P<method>[a-z][A-Za-z0-9_]*)\s*\(")
+_JAVA_SEND_RE = re.compile(
+    r"\b(?P<sender>[A-Za-z_][A-Za-z0-9_]*)\.send\s*\(\s*(?P<topic>[^,\n)]+)"
+)
+_JAVA_ROCKET_SEND_RE = re.compile(
+    r"\b(?P<sender>[A-Za-z_][A-Za-z0-9_]*)\."
+    r"(?P<method>syncSend|asyncSend|sendOneWay|convertAndSend|sendMessageInTransaction)"
+    r"\s*\(\s*(?P<destination>[^,\n)]+)"
+)
+_JAVA_ASSIGNMENT_RE = re.compile(
+    r"\b(?:String\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>[^;]+);"
+)
 _SQL_TABLE_RE = re.compile(
     r"\b(?:from|join|into|update)\s+`?(?P<table>[A-Za-z_][\w.]*)`?",
     re.IGNORECASE,
@@ -444,7 +455,7 @@ class ExecutionTraceTool:
             downstream_sources = _read_method_sources(
                 root=tool_input.project_path,
                 rows=downstream_rows,
-                max_methods=max(1, min(tool_input.top_k, 8)),
+                max_methods=max(1, min(tool_input.top_k * 2, 16)),
                 max_lines=max(tool_input.max_source_lines, 220),
             )
             second_downstream_rows = _resolve_downstream_methods(
@@ -456,7 +467,7 @@ class ExecutionTraceTool:
             second_downstream_sources = _read_method_sources(
                 root=tool_input.project_path,
                 rows=second_downstream_rows,
-                max_methods=max(1, min(tool_input.top_k, 8)),
+                max_methods=max(1, min(tool_input.top_k * 2, 16)),
                 max_lines=max(tool_input.max_source_lines, 180),
             )
             sql_rows = _resolve_sql_statement_rows(
@@ -501,6 +512,7 @@ class ExecutionTraceTool:
             ]
         )
         evidence = _execution_trace_evidence(all_sources)
+        evidence.extend(_execution_message_evidence(all_sources))
         evidence.extend(_execution_table_evidence(table_rows))
         source_snippets = [
             SourceSnippet(
@@ -553,12 +565,35 @@ class SourceReadTool:
             max_lines=tool_input.max_source_lines,
             line_padding=tool_input.source_line_padding,
         )
+        evidence_scope = _source_read_scope(tool_input.evidence)
+        evidence = [
+            RagEvidence(
+                evidence_type="source_snippet",
+                source="source_read",
+                file_path=snippet.file_path,
+                start_line=snippet.start_line,
+                end_line=snippet.end_line,
+                score=1.0,
+                content_excerpt=snippet.content,
+                metadata={"source": "source_read", "evidence_scope": evidence_scope},
+            )
+            for snippet in snippets
+        ]
         return ToolResult(
             tool_name=self.config.name,
             summary=f"Source read returned {len(snippets)} snippets.",
+            evidence=evidence,
             source_snippets=snippets,
             warnings=warnings,
         )
+
+
+def _source_read_scope(evidence: list[RagEvidence]) -> str:
+    if any(item.metadata.get("evidence_scope") == "hard" for item in evidence):
+        return "hard"
+    if any(item.metadata.get("evidence_scope") == "soft" for item in evidence):
+        return "soft"
+    return "unscoped"
 
 
 def create_tool(config: ToolConfig) -> RagTool:
@@ -588,6 +623,22 @@ def _resolve_execution_targets(
 ) -> list[tuple[Symbol, File]]:
     if not target_terms:
         return []
+    exact_annotation_rows = _resolve_exact_annotation_execution_targets(
+        session=session,
+        project_id=project_id,
+        target_terms=target_terms,
+        limit=limit,
+    )
+    if exact_annotation_rows:
+        return exact_annotation_rows[:limit]
+    exact_method_rows = _resolve_exact_method_execution_targets(
+        session=session,
+        project_id=project_id,
+        target_terms=target_terms,
+        limit=limit,
+    )
+    if exact_method_rows:
+        return exact_method_rows[:limit]
     annotation_target_rows = _resolve_annotation_execution_targets(
         session=session,
         project_id=project_id,
@@ -617,6 +668,73 @@ def _resolve_execution_targets(
         annotation_target_rows,
         _rank_execution_target_rows(method_rows, target_terms),
     )[:limit]
+
+
+def _resolve_exact_annotation_execution_targets(
+    session: Any,
+    project_id: str,
+    target_terms: list[str],
+    limit: int,
+) -> list[tuple[Symbol, File]]:
+    rows = session.execute(
+        select(Symbol)
+        .where(Symbol.project_id == project_id)
+        .where(Symbol.kind == "annotation_usage")
+        .where(
+            or_(
+                Symbol.name.in_([f"@XxlJob {term}" for term in target_terms]),
+                *[
+                    Symbol.qualified_name.ilike(f"annotation_usage:XxlJob:{term}:%")
+                    for term in target_terms[:8]
+                ],
+            )
+        )
+        .limit(limit)
+    ).scalars()
+    target_ids = [
+        target_id
+        for symbol in rows
+        if isinstance(symbol.meta, dict)
+        if isinstance(target_id := symbol.meta.get("target_symbol_id"), str)
+    ]
+    return _target_rows_by_ids(session, project_id, target_ids, limit)
+
+
+def _resolve_exact_method_execution_targets(
+    session: Any,
+    project_id: str,
+    target_terms: list[str],
+    limit: int,
+) -> list[tuple[Symbol, File]]:
+    rows = session.execute(
+        select(Symbol, File)
+        .join(File, File.id == Symbol.file_id)
+        .where(Symbol.project_id == project_id)
+        .where(Symbol.kind.in_(["method", "constructor", "route"]))
+        .where(Symbol.name.in_(target_terms[:20]))
+        .order_by(File.path, Symbol.start_line)
+        .limit(limit)
+    ).all()
+    return cast(list[tuple[Symbol, File]], rows)
+
+
+def _target_rows_by_ids(
+    session: Any,
+    project_id: str,
+    target_ids: list[str],
+    limit: int,
+) -> list[tuple[Symbol, File]]:
+    if not target_ids:
+        return []
+    rows = session.execute(
+        select(Symbol, File)
+        .join(File, File.id == Symbol.file_id)
+        .where(Symbol.project_id == project_id)
+        .where(Symbol.id.in_(target_ids))
+        .limit(limit)
+    ).all()
+    order = {target_id: index for index, target_id in enumerate(target_ids)}
+    return sorted(rows, key=lambda row: order.get(row[0].id, len(order)))
 
 
 def _resolve_annotation_execution_targets(
@@ -650,15 +768,7 @@ def _resolve_annotation_execution_targets(
     ]
     if not target_ids:
         return []
-    rows = session.execute(
-        select(Symbol, File)
-        .join(File, File.id == Symbol.file_id)
-        .where(Symbol.project_id == project_id)
-        .where(Symbol.id.in_(target_ids))
-        .limit(limit)
-    ).all()
-    order = {target_id: index for index, target_id in enumerate(target_ids)}
-    return sorted(rows, key=lambda row: order.get(row[0].id, len(order)))
+    return _target_rows_by_ids(session, project_id, target_ids, limit)
 
 
 def _merge_ranked_execution_targets(
@@ -679,11 +789,14 @@ def _execution_target_candidates(
     query: str,
     filters: dict[str, Any],
 ) -> list[str]:
-    values = _target_candidates(query, filters)
+    explicit_values: list[str] = []
     explicit_target = _optional_string(filters.get("target"))
     if explicit_target:
-        values.append(explicit_target)
-    values.extend(_string_list(filters.get("targets")))
+        explicit_values.append(explicit_target)
+    explicit_values.extend(_string_list(filters.get("targets")))
+    if explicit_values:
+        return _dedupe_terms(explicit_values)
+    values = _target_candidates(query, filters)
     generic = {term.lower() for term in load_target_trace_config().generic_terms}
     for term in _query_terms(query):
         lowered = term.lower()
@@ -826,15 +939,65 @@ def _resolve_downstream_methods(
     if not method_names:
         return []
     method_refs = _called_method_refs(method_sources)
-    rows = session.execute(
-        select(Symbol, File)
-        .join(File, File.id == Symbol.file_id)
-        .where(Symbol.project_id == project_id)
-        .where(Symbol.kind.in_(["method", "constructor"]))
-        .where(Symbol.name.in_(method_names[:80]))
-        .limit(limit)
-    ).all()
-    return _rank_downstream_rows(rows, method_sources, method_names, method_refs)
+    exact_names = _same_class_method_names(method_sources, method_names)
+    rows: list[tuple[Symbol, File]] = []
+    if exact_names:
+        rows.extend(
+            session.execute(
+                select(Symbol, File)
+                .join(File, File.id == Symbol.file_id)
+                .where(Symbol.project_id == project_id)
+                .where(Symbol.kind.in_(["method", "constructor"]))
+                .where(Symbol.qualified_name.in_(exact_names))
+            ).all()
+        )
+    rows.extend(
+        session.execute(
+            select(Symbol, File)
+            .join(File, File.id == Symbol.file_id)
+            .where(Symbol.project_id == project_id)
+            .where(Symbol.kind.in_(["method", "constructor"]))
+            .where(Symbol.name.in_(method_names[:80]))
+            .limit(max(limit * 4, limit))
+        ).all()
+    )
+    ranked = _rank_downstream_rows(
+        _dedupe_symbol_file_rows(rows),
+        method_sources,
+        method_names,
+        method_refs,
+    )
+    return ranked[:limit]
+
+
+def _same_class_method_names(
+    method_sources: list[_MethodSource],
+    method_names: list[str],
+) -> list[str]:
+    source_classes = {
+        item.symbol.qualified_name.rsplit(".", maxsplit=1)[0]
+        for item in method_sources
+        if "." in item.symbol.qualified_name
+    }
+    names = method_names[:80]
+    return [
+        f"{source_class}.{method_name}"
+        for source_class in sorted(source_classes)
+        for method_name in names
+    ]
+
+
+def _dedupe_symbol_file_rows(
+    rows: list[tuple[Symbol, File]],
+) -> list[tuple[Symbol, File]]:
+    seen: set[str] = set()
+    result: list[tuple[Symbol, File]] = []
+    for symbol, file_row in rows:
+        if symbol.id in seen:
+            continue
+        seen.add(symbol.id)
+        result.append((symbol, file_row))
+    return result
 
 
 def _resolve_sql_statement_rows(
@@ -994,6 +1157,11 @@ def _rank_downstream_rows(
         item.symbol.qualified_name.rsplit(".", maxsplit=1)[0]
         for item in method_sources
     }
+    method_ref_names = {
+        match.group("method")
+        for item in method_sources
+        for match in _JAVA_METHOD_REF_RE.finditer(item.content)
+    }
     name_order = {name: index for index, name in enumerate(method_names)}
     receiver_targets = {
         (class_name, method): index
@@ -1007,6 +1175,11 @@ def _rank_downstream_rows(
         receiver_priority = _receiver_match_priority(symbol, receiver_targets)
         if receiver_priority is not None:
             priority = receiver_priority
+        elif (
+            symbol.name in method_ref_names
+            and symbol.qualified_name.rsplit(".", maxsplit=1)[0] in source_classes
+        ):
+            priority = 0
         elif symbol.id in source_ids:
             priority = 9
         elif file_row.path in source_paths:
@@ -1092,6 +1265,116 @@ def _execution_trace_evidence(
             )
         )
     return evidence
+
+
+def _execution_message_evidence(
+    method_sources: list[_MethodSource],
+) -> list[RagEvidence]:
+    evidence: list[RagEvidence] = []
+    for item in method_sources:
+        assignments = _source_assignments(item.content)
+        for line_offset, line in enumerate(item.content.splitlines(), start=0):
+            match = _JAVA_SEND_RE.search(line)
+            if match is not None:
+                topic_expr = _clean_source_expr(match.group("topic"))
+                for topic in _resolve_source_expr(topic_expr, assignments):
+                    evidence.append(
+                        _message_publish_evidence(
+                            item=item,
+                            line_offset=line_offset,
+                            line=line,
+                            sender=match.group("sender"),
+                            topic=topic,
+                            tag=None,
+                            raw_destination=topic_expr,
+                        )
+                    )
+                continue
+            rocket_match = _JAVA_ROCKET_SEND_RE.search(line)
+            if rocket_match is None:
+                continue
+            destination_expr = _clean_source_expr(rocket_match.group("destination"))
+            for destination in _resolve_source_expr(destination_expr, assignments):
+                topic, tag = _source_topic_and_tag(destination)
+                evidence.append(
+                    _message_publish_evidence(
+                        item=item,
+                        line_offset=line_offset,
+                        line=line,
+                        sender=rocket_match.group("sender"),
+                        topic=topic,
+                        tag=tag,
+                        raw_destination=destination_expr,
+                    )
+                )
+    return evidence
+
+
+def _message_publish_evidence(
+    *,
+    item: _MethodSource,
+    line_offset: int,
+    line: str,
+    sender: str,
+    topic: str,
+    tag: str | None,
+    raw_destination: str,
+) -> RagEvidence:
+    destination = f"{topic}:{tag}" if tag else topic
+    return RagEvidence(
+        evidence_type="execution_message:publishes",
+        source="execution_trace",
+        file_path=item.file_row.path,
+        start_line=item.start_line + line_offset,
+        end_line=item.start_line + line_offset,
+        symbol=f"{item.symbol.qualified_name} -> {destination}",
+        score=1.0,
+        content_excerpt=(
+            f"{sender} publishes topic {topic}"
+            f"{f' tag {tag}' if tag else ''}; "
+            f"raw_destination={raw_destination}; line={line.strip()}"
+        ),
+        metadata={
+            "symbol_id": item.symbol.id,
+            "sender": sender,
+            "topic": topic,
+            "tag": tag,
+            "raw_destination": raw_destination,
+            "kind": "message_publish",
+        },
+    )
+
+
+def _source_assignments(content: str) -> dict[str, list[str]]:
+    assignments: dict[str, list[str]] = {}
+    for match in _JAVA_ASSIGNMENT_RE.finditer(content):
+        name = match.group("name")
+        value = _clean_source_expr(match.group("value"))
+        if not name or not value:
+            continue
+        assignments.setdefault(name, []).append(value)
+    return assignments
+
+
+def _resolve_source_expr(
+    expression: str,
+    assignments: dict[str, list[str]],
+) -> list[str]:
+    if expression in assignments:
+        return _dedupe_terms(assignments[expression])
+    return [expression] if expression else []
+
+
+def _clean_source_expr(value: str) -> str:
+    return value.strip().strip('"')
+
+
+def _source_topic_and_tag(destination: str) -> tuple[str, str | None]:
+    value = _clean_source_expr(destination)
+    if ":" in value and "://" not in value:
+        topic, tag = value.split(":", maxsplit=1)
+        return (_clean_source_expr(topic), _clean_source_expr(tag) or None)
+    return (value, None)
 
 
 def _execution_details(content: str) -> str:

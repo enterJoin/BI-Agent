@@ -7,6 +7,13 @@ do not treat it as code evidence unless supported by Evidence or Source snippets
 Do not answer a previous conversation-history question unless the current
 question explicitly asks to continue or refer back to it.
 If evidence is insufficient, say so explicitly.
+If Hard constraints for this turn contains targets and
+evidence_must_be_reachable_from_targets=true, final conclusions must come from
+Evidence marked [HARD]. Evidence marked [SOFT] is only background or terminology
+context and must not be stated as a confirmed table, Job, API, method, or
+persistence result for the constrained targets. If a [SOFT] item looks relevant
+but is not [HARD], say it was not confirmed in the constrained target call
+chain instead of including it as a result.
 If Evidence contains module_scope_empty, state that the resolved module has no
 direct/local evidence for the requested scope. If it also contains
 module_related_service or related_service_table evidence, present those as
