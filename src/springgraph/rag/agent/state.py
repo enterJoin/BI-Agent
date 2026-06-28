@@ -44,6 +44,7 @@ class AgenticRagState(TypedDict, total=False):
     project_path: str
     project_id: str
     question: str
+    title: str | None
     top_k: int
     graph_depth: int
     read_source: bool

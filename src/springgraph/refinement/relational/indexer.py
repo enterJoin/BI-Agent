@@ -28,7 +28,11 @@ from springgraph.refinement.relational.scanner import ScannedFile, scan_project
 logger = logging.getLogger(__name__)
 
 
-def index_project(root: Path, session: Session) -> int:
+def index_project(
+    root: Path,
+    session: Session,
+    scanned_files: list[ScannedFile] | None = None,
+) -> int:
     """Index a Java Spring Boot project or workspace path."""
     root = root.resolve()
     project_id_value = project_id(root)
@@ -45,7 +49,8 @@ def index_project(root: Path, session: Session) -> int:
 
     errors: list[str] = []
     scan_started_at = perf_counter()
-    scanned_files = scan_project(root)
+    if scanned_files is None:
+        scanned_files = scan_project(root)
     logger.info(
         "Relational scan completed: project_id=%s, files=%s, "
         "elapsed_seconds=%.3f",
@@ -58,31 +63,37 @@ def index_project(root: Path, session: Session) -> int:
     skipped_unchanged = 0
     for scanned_file in scanned_files:
         try:
-            changed = _upsert_file(session, project_id_value, scanned_file)
-            if not changed:
-                skipped_unchanged += 1
-                continue
-            _delete_file_symbols(session, project_id_value, scanned_file.relative_path)
-            result = _extract_file(project_id_value, scanned_file)
-            _insert_symbols(
-                session, project_id_value, scanned_file.relative_path, result.symbols
-            )
-            _insert_edges(session, project_id_value, result.edges)
-            _insert_unresolved(
-                session,
-                project_id_value,
-                scanned_file.relative_path,
-                result.unresolved_refs,
-            )
-            if result.errors:
-                _mark_file_error(
+            with session.begin_nested():
+                changed = _upsert_file(session, project_id_value, scanned_file)
+                if not changed:
+                    skipped_unchanged += 1
+                    continue
+                _delete_file_symbols(
+                    session, project_id_value, scanned_file.relative_path
+                )
+                result = _extract_file(project_id_value, scanned_file)
+                _insert_symbols(
                     session,
                     project_id_value,
                     scanned_file.relative_path,
-                    "; ".join(result.errors),
+                    result.symbols,
                 )
-            files_indexed += 1
-            errors.extend(result.errors)
+                _insert_edges(session, project_id_value, result.edges)
+                _insert_unresolved(
+                    session,
+                    project_id_value,
+                    scanned_file.relative_path,
+                    result.unresolved_refs,
+                )
+                if result.errors:
+                    _mark_file_error(
+                        session,
+                        project_id_value,
+                        scanned_file.relative_path,
+                        "; ".join(result.errors),
+                    )
+                files_indexed += 1
+                errors.extend(result.errors)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{scanned_file.relative_path}: {exc}")
             logger.warning(
@@ -92,9 +103,8 @@ def index_project(root: Path, session: Session) -> int:
                 scanned_file.relative_path,
                 exc,
             )
-            _mark_file_error(
-                session, project_id_value, scanned_file.relative_path, str(exc)
-            )
+            with session.begin_nested():
+                _upsert_file_error(session, project_id_value, scanned_file, str(exc))
     logger.info(
         "Relational file indexing completed: project_id=%s, processed=%s, "
         "indexed=%s, skipped_unchanged=%s, errors=%s, elapsed_seconds=%.3f",
@@ -106,18 +116,25 @@ def index_project(root: Path, session: Session) -> int:
         perf_counter() - extraction_started_at,
     )
 
-    resolve_started_at = perf_counter()
-    logger.info(
-        "Relational reference resolution started: project_id=%s",
-        project_id_value,
-    )
-    resolve_project_refs(session, project_id_value)
-    logger.info(
-        "Relational reference resolution completed: project_id=%s, "
-        "elapsed_seconds=%.3f",
-        project_id_value,
-        perf_counter() - resolve_started_at,
-    )
+    if files_indexed:
+        resolve_started_at = perf_counter()
+        logger.info(
+            "Relational reference resolution started: project_id=%s",
+            project_id_value,
+        )
+        resolve_project_refs(session, project_id_value)
+        logger.info(
+            "Relational reference resolution completed: project_id=%s, "
+            "elapsed_seconds=%.3f",
+            project_id_value,
+            perf_counter() - resolve_started_at,
+        )
+    else:
+        logger.info(
+            "Relational reference resolution skipped: project_id=%s, "
+            "reason=no_changed_files",
+            project_id_value,
+        )
     run.status = "completed" if not errors else "completed_with_errors"
     run.finished_at = datetime.now(tz=UTC)
     run.files_seen = len(scanned_files)
@@ -194,6 +211,34 @@ def _upsert_file(
     return True
 
 
+def _upsert_file_error(
+    session: Session,
+    project_id_value: str,
+    scanned_file: ScannedFile,
+    error: str,
+) -> None:
+    content = _read_text(scanned_file.path)
+    values = {
+        "id": file_row_id(project_id_value, scanned_file.relative_path),
+        "project_id": project_id_value,
+        "path": scanned_file.relative_path,
+        "module_name": scanned_file.module_name,
+        "service_name": scanned_file.service_name,
+        "language": scanned_file.language,
+        "content_hash": content_hash(content),
+        "size_bytes": scanned_file.size_bytes,
+        "modified_at": scanned_file.modified_at,
+        "indexed_at": datetime.now(tz=UTC),
+        "error": error,
+    }
+    stmt = insert(File).values(**values)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[File.project_id, File.path],
+        set_=values,
+    )
+    session.execute(stmt)
+
+
 def _delete_file_symbols(
     session: Session, project_id_value: str, relative_path: str
 ) -> None:
@@ -229,9 +274,13 @@ def _insert_symbols(
     relative_path: str,
     symbols: list[SymbolData],
 ) -> None:
+    if not symbols:
+        return
     file_id = file_row_id(project_id_value, relative_path)
+    timestamp = datetime.now(tz=UTC)
+    values_by_id: dict[str, dict[str, Any]] = {}
     for symbol in symbols:
-        values: dict[str, Any] = {
+        values_by_id[symbol.id] = {
             "id": symbol.id,
             "project_id": project_id_value,
             "file_id": file_id,
@@ -248,22 +297,37 @@ def _insert_symbols(
             "annotations": symbol.annotations,
             "modifiers": symbol.modifiers,
             "metadata": symbol.metadata,
-            "updated_at": datetime.now(tz=UTC),
+            "updated_at": timestamp,
         }
-        table = cast(Table, Symbol.__table__)
-        stmt = insert(table).values(**values)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[table.c.id],
-            set_={key: getattr(stmt.excluded, key) for key in values},
-        )
-        session.execute(stmt)
+    values_list = list(values_by_id.values())
+    table = cast(Table, Symbol.__table__)
+    stmt = insert(table).values(values_list)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[table.c.id],
+        set_={key: getattr(stmt.excluded, key) for key in values_list[0]},
+    )
+    session.execute(stmt)
 
 
 def _insert_edges(
     session: Session, project_id_value: str, edges: list[EdgeData]
 ) -> None:
+    if not edges:
+        return
+    values_by_key: dict[
+        tuple[str, str, str, str, int | None, int | None],
+        dict[str, Any],
+    ] = {}
     for edge in edges:
-        values = {
+        key = (
+            project_id_value,
+            edge.source_id,
+            edge.target_id,
+            edge.kind,
+            edge.line,
+            edge.column_no,
+        )
+        values_by_key[key] = {
             "project_id": project_id_value,
             "source_id": edge.source_id,
             "target_id": edge.target_id,
@@ -274,19 +338,20 @@ def _insert_edges(
             "resolved_by": edge.resolved_by,
             "metadata": edge.metadata,
         }
-        table = cast(Table, Edge.__table__)
-        stmt = insert(table).values(**values)
-        stmt = stmt.on_conflict_do_nothing(
-            index_elements=[
-                table.c.project_id,
-                table.c.source_id,
-                table.c.target_id,
-                table.c.kind,
-                table.c.line,
-                table.c.column_no,
-            ]
-        )
-        session.execute(stmt)
+    values_list = list(values_by_key.values())
+    table = cast(Table, Edge.__table__)
+    stmt = insert(table).values(values_list)
+    stmt = stmt.on_conflict_do_nothing(
+        index_elements=[
+            table.c.project_id,
+            table.c.source_id,
+            table.c.target_id,
+            table.c.kind,
+            table.c.line,
+            table.c.column_no,
+        ]
+    )
+    session.execute(stmt)
 
 
 def _insert_unresolved(
@@ -295,9 +360,20 @@ def _insert_unresolved(
     relative_path: str,
     unresolved_refs: list[UnresolvedRefData],
 ) -> None:
+    if not unresolved_refs:
+        return
     file_id = file_row_id(project_id_value, relative_path)
+    values_by_key: dict[tuple[str, str, str, str, int, int], dict[str, Any]] = {}
     for ref in unresolved_refs:
-        values = {
+        key = (
+            project_id_value,
+            ref.from_symbol_id,
+            ref.reference_name,
+            ref.reference_kind,
+            ref.line,
+            ref.column_no,
+        )
+        values_by_key[key] = {
             "project_id": project_id_value,
             "from_symbol_id": ref.from_symbol_id,
             "file_id": file_id,
@@ -308,20 +384,21 @@ def _insert_unresolved(
             "candidates": ref.candidates,
             "metadata": ref.metadata,
         }
-        table = cast(Table, UnresolvedRef.__table__)
-        stmt = insert(table).values(**values)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[
-                table.c.project_id,
-                table.c.from_symbol_id,
-                table.c.reference_name,
-                table.c.reference_kind,
-                table.c.line,
-                table.c.column_no,
-            ],
-            set_={key: getattr(stmt.excluded, key) for key in values},
-        )
-        session.execute(stmt)
+    values_list = list(values_by_key.values())
+    table = cast(Table, UnresolvedRef.__table__)
+    stmt = insert(table).values(values_list)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[
+            table.c.project_id,
+            table.c.from_symbol_id,
+            table.c.reference_name,
+            table.c.reference_kind,
+            table.c.line,
+            table.c.column_no,
+        ],
+        set_={key: getattr(stmt.excluded, key) for key in values_list[0]},
+    )
+    session.execute(stmt)
 
 
 def _mark_file_error(

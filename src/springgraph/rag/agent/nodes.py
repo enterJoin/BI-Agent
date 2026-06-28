@@ -140,7 +140,7 @@ def execute_retrieval_plan(state: AgenticRagState) -> AgenticRagState:
     if not executed_source_read and _should_auto_source_read(state):
         tool = registry.get("source_read")
         if tool is not None:
-            step: PlanStep = {
+            source_read_step: PlanStep = {
                 "tool_name": "source_read",
                 "query": state["question"],
                 "filters": {"trigger": "auto_target_trace"},
@@ -149,7 +149,7 @@ def execute_retrieval_plan(state: AgenticRagState) -> AgenticRagState:
             result = tool.invoke(
                 _tool_input(
                     state,
-                    step,
+                    source_read_step,
                     evidence=_prioritized_source_evidence(state.get("evidence", [])),
                 )
             )

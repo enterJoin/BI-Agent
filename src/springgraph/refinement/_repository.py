@@ -1,6 +1,7 @@
 """Persistence helpers for semantic refinement."""
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
@@ -33,6 +34,15 @@ PARSER_VERSION = "semantic-refinement-v1"
 TEMPLATE_VERSION = "semantic-refinement-v1"
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class FileChangePlan:
+    """Files grouped by whether semantic refinement must be rebuilt."""
+
+    changed: list[RefinedFile]
+    unchanged: list[RefinedFile]
+    content_hashes: dict[str, str]
 
 
 class RefinementRepository:
@@ -75,13 +85,65 @@ class RefinementRepository:
             )
         )
 
-    def upsert_files(self, files: list[RefinedFile]) -> dict[str, str]:
+    def delete_missing_files(self, current_paths: set[str]) -> int:
+        """Delete file rows that no longer exist in the scanned project."""
+        statement = delete(File).where(File.project_id == self.project_id)
+        if current_paths:
+            statement = statement.where(File.path.not_in(current_paths))
+        result = self.session.execute(statement)
+        return int(getattr(result, "rowcount", 0) or 0)
+
+    def plan_file_changes(self, files: list[RefinedFile]) -> FileChangePlan:
+        """Compare scanned files with stored hashes for incremental refinement."""
+        existing_rows = self.session.execute(
+            select(File.path, File.content_hash, File.error).where(
+                File.project_id == self.project_id
+            )
+        ).all()
+        existing = {
+            str(path): (str(content_hash_value), error)
+            for path, content_hash_value, error in existing_rows
+        }
+        changed: list[RefinedFile] = []
+        unchanged: list[RefinedFile] = []
+        content_hashes: dict[str, str] = {}
+        for item in files:
+            source = _read_text(item.path)
+            digest_value = content_hash(source)
+            content_hashes[item.relative_path] = digest_value
+            stored = existing.get(item.relative_path)
+            if stored is not None and stored[0] == digest_value and stored[1] is None:
+                unchanged.append(item)
+            else:
+                changed.append(item)
+        return FileChangePlan(
+            changed=changed,
+            unchanged=unchanged,
+            content_hashes=content_hashes,
+        )
+
+    def file_ids_for(self, files: list[RefinedFile]) -> dict[str, str]:
+        """Return relative path to deterministic file row ID mapping."""
+        return {
+            item.relative_path: file_row_id(self.project_id, item.relative_path)
+            for item in files
+        }
+
+    def upsert_files(
+        self,
+        files: list[RefinedFile],
+        content_hashes: dict[str, str] | None = None,
+    ) -> dict[str, str]:
         """Upsert file rows and return relative path to row ID mapping."""
         file_ids: dict[str, str] = {}
         for item in files:
-            source = _read_text(item.path)
             row_id = file_row_id(self.project_id, item.relative_path)
             file_ids[item.relative_path] = row_id
+            digest_value = (
+                content_hashes[item.relative_path]
+                if content_hashes and item.relative_path in content_hashes
+                else content_hash(_read_text(item.path))
+            )
             values = {
                 "id": row_id,
                 "project_id": self.project_id,
@@ -89,7 +151,7 @@ class RefinementRepository:
                 "module_name": item.module_name,
                 "service_name": item.service_name,
                 "language": item.language,
-                "content_hash": content_hash(source),
+                "content_hash": digest_value,
                 "size_bytes": item.size_bytes,
                 "modified_at": item.modified_at,
                 "indexed_at": datetime.now(tz=UTC),
@@ -102,6 +164,28 @@ class RefinementRepository:
             )
             self.session.execute(stmt)
         return file_ids
+
+    def clear_file_refinement_outputs(self, file_ids: list[str]) -> None:
+        """Remove stale semantic chunks and outgoing refinement edges for files."""
+        if not file_ids:
+            return
+        source_symbol_ids = select(Symbol.id).where(
+            Symbol.project_id == self.project_id,
+            Symbol.file_id.in_(file_ids),
+        )
+        self.session.execute(
+            delete(Edge).where(
+                Edge.project_id == self.project_id,
+                Edge.resolved_by == "refinement",
+                Edge.source_id.in_(source_symbol_ids),
+            )
+        )
+        self.session.execute(
+            delete(CodeChunk).where(
+                CodeChunk.project_id == self.project_id,
+                CodeChunk.file_id.in_(file_ids),
+            )
+        )
 
     def upsert_facts(
         self, facts: RefinementFacts, file_ids: dict[str, str]
@@ -308,6 +392,92 @@ class RefinementRepository:
             perf_counter() - started_at,
         )
         return chunk_count, embedding_count
+
+    def chunks_missing_embeddings(
+        self,
+        file_ids: list[str],
+        embedder: Embedder,
+    ) -> list[CodeChunk]:
+        """Return unchanged chunks missing vectors for the current embedder."""
+        if not file_ids:
+            return []
+        matching_embedding = (
+            select(ChunkEmbedding.id)
+            .where(
+                ChunkEmbedding.chunk_id == CodeChunk.id,
+                ChunkEmbedding.project_id == self.project_id,
+                ChunkEmbedding.embedding_model == embedder.model_name,
+                ChunkEmbedding.embedding_dim == embedder.dimensions,
+                ChunkEmbedding.content_hash == CodeChunk.content_hash,
+                ChunkEmbedding.status == "active",
+            )
+            .exists()
+        )
+        return list(
+            self.session.scalars(
+                select(CodeChunk).where(
+                    CodeChunk.project_id == self.project_id,
+                    CodeChunk.file_id.in_(file_ids),
+                    CodeChunk.status == "active",
+                    ~matching_embedding,
+                )
+            )
+        )
+
+    def upsert_embeddings_for_existing_chunks(
+        self,
+        chunks: list[CodeChunk],
+        embedder: Embedder,
+    ) -> int:
+        """Build embeddings for already stored chunks."""
+        started_at = perf_counter()
+        logger.info(
+            "Missing embedding upsert started: project_id=%s, chunks=%s, "
+            "embedding_model=%s, embedding_dim=%s",
+            self.project_id,
+            len(chunks),
+            embedder.model_name,
+            embedder.dimensions,
+        )
+        embedding_count = 0
+        embedding_table = cast(Table, ChunkEmbedding.__table__)
+        for chunk in chunks:
+            embedding = embedder.embed(chunk.content)
+            embedding_id = _embedding_id(
+                self.project_id,
+                chunk.id,
+                embedder.model_name,
+                embedder.dimensions,
+                chunk.content_hash,
+            )
+            embedding_values = {
+                "id": embedding_id,
+                "chunk_id": chunk.id,
+                "project_id": self.project_id,
+                "embedding_model": embedder.model_name,
+                "embedding_dim": embedder.dimensions,
+                "embedding": embedding,
+                "content_hash": chunk.content_hash,
+                "status": "active",
+            }
+            embedding_stmt = insert(embedding_table).values(**embedding_values)
+            embedding_stmt = embedding_stmt.on_conflict_do_update(
+                index_elements=[embedding_table.c.id],
+                set_={
+                    key: getattr(embedding_stmt.excluded, key)
+                    for key in embedding_values
+                },
+            )
+            self.session.execute(embedding_stmt)
+            embedding_count += 1
+        logger.info(
+            "Missing embedding upsert completed: project_id=%s, "
+            "embeddings_upserted=%s, elapsed_seconds=%.3f",
+            self.project_id,
+            embedding_count,
+            perf_counter() - started_at,
+        )
+        return embedding_count
 
     def finish_embedding_job(
         self, job: EmbeddingJob, chunks_embedded: int, errors: list[str]

@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import AliasChoices, BaseModel, Field, ValidationError
 from sqlalchemy import desc, select
+from starlette.concurrency import run_in_threadpool
 
 from springgraph.config import get_settings
 from springgraph.db import session_scope
@@ -310,12 +311,12 @@ def create_app() -> FastAPI:
         return _project_response(project)
 
     @app.post("/api/refine", response_model=RefineProjectResponse)
-    def refine_endpoint(request: RefineProjectRequest) -> RefineProjectResponse:
+    async def refine_endpoint(request: RefineProjectRequest) -> RefineProjectResponse:
         project_path = _validated_project_path(request.project_path)
         started_at = perf_counter()
         logger.info("Refine API request started: project_path=%s", project_path)
         try:
-            result = refine_project(project_path)
+            result = await run_in_threadpool(refine_project, project_path)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Project refinement failed for path: %s", project_path)
             raise HTTPException(status_code=500, detail=str(exc)) from exc

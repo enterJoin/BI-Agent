@@ -374,9 +374,10 @@ def _aggregate_tables(config: ToolConfig, tool_input: ToolInput) -> ToolResult:
             )
         elif path_contains:
             statement = statement.where(File.path.ilike(f"%{path_contains}%"))
-        rows = session.execute(
+        row_results = session.execute(
             statement.order_by(File.path, Symbol.kind, Symbol.name).limit(limit)
         ).all()
+        rows = [(symbol, file_row) for symbol, file_row in row_results]
         rows = _rank_table_rows(rows, query)
         fallback_evidence = []
         if not rows and resolved_module:

@@ -327,6 +327,9 @@ ON code_chunks(project_id, chunk_type, status);
 CREATE INDEX IF NOT EXISTS idx_code_chunks_file
 ON code_chunks(file_id);
 
+CREATE INDEX IF NOT EXISTS idx_code_chunks_project_file
+ON code_chunks(project_id, file_id);
+
 CREATE INDEX IF NOT EXISTS idx_code_chunks_symbol
 ON code_chunks(symbol_id);
 
@@ -341,6 +344,9 @@ ON code_chunks USING gin(to_tsvector('simple', content));
 
 CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_project_model
 ON chunk_embeddings(project_id, embedding_model, embedding_dim, status);
+
+CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_chunk_model_dim_hash
+ON chunk_embeddings(chunk_id, embedding_model, embedding_dim, content_hash);
 
 CREATE INDEX IF NOT EXISTS idx_rag_threads_project_user_updated
 ON rag_threads(project_id, user_id, updated_at);

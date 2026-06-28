@@ -205,6 +205,8 @@ def _dict_list(value: object) -> list[dict[str, object]]:
 
 
 def _int_value(value: object, fallback: int) -> int:
+    if not isinstance(value, (str, bytes, bytearray, int, float)):
+        return fallback
     try:
         return int(value)
     except (TypeError, ValueError):
