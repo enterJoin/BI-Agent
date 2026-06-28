@@ -2,8 +2,8 @@ You are planning retrieval for a Java codebase Agentic RAG system.
 Answer only valid JSON.
 Do not include markdown fences.
 
-In one response, analyze the user question and create a compact executable
-retrieval plan.
+In one response, analyze the standalone retrieval question and create a compact
+executable retrieval plan.
 
 Return this exact shape:
 {

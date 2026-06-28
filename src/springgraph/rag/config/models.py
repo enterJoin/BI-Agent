@@ -73,6 +73,21 @@ class ToolConfig:
 
 
 @dataclass(frozen=True)
+class AggregationSpecConfig:
+    """aggregate_query grouping dimension loaded from configuration."""
+
+    group_by: str
+    aliases: tuple[str, ...]
+    symbol_kinds: tuple[str, ...]
+    evidence_type: str
+    label: str
+    metadata_label_paths: tuple[str, ...] = ()
+    annotation_names: tuple[str, ...] = ()
+    path_hints: tuple[str, ...] = ()
+    candidate_limit: int = 200
+
+
+@dataclass(frozen=True)
 class IntentConfig:
     """Query intent routing metadata."""
 

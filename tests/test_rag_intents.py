@@ -1,3 +1,4 @@
+from springgraph.rag import query_resolver
 from springgraph.rag.agent import planner
 from springgraph.rag.agent.planner import (
     apply_intent_defaults,
@@ -46,6 +47,7 @@ def test_execution_trace_heuristics_are_config_driven() -> None:
     config = load_execution_trace_config()
 
     assert "\u8be6\u7ec6\u6b65\u9aa4" in config.trigger_terms
+    assert "\u8be6\u7ec6\u8fc7\u7a0b" in config.trigger_terms
     assert "Handler" in config.entrypoint_suffixes
     assert planner._looks_like_execution_trace_question(
         "tencentMaterialReportHandler"
@@ -53,6 +55,80 @@ def test_execution_trace_heuristics_are_config_driven() -> None:
     assert planner._looks_like_execution_trace_question(
         "syncOrder\u6267\u884c\u8be6\u7ec6\u6b65\u9aa4"
     )
+    assert planner._looks_like_execution_trace_question(
+        "\u8be6\u7ec6\u8fc7\u7a0b\u662f\u4ec0\u4e48"
+    )
+
+
+def test_query_resolver_carries_recent_job_target(
+    monkeypatch: object,
+) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_invoke_json(prompt: str) -> dict[str, object]:
+        captured["prompt"] = prompt
+        return {
+            "is_follow_up": True,
+            "needs_context": True,
+            "needs_clarification": False,
+            "resolved_target": {
+                "type": "job",
+                "name": "tencentNineImageMappingHandler",
+                "source": "history",
+                "confidence": 0.95,
+            },
+            "rewritten_question": (
+                "tencentNineImageMappingHandler "
+                "\u8be6\u7ec6\u8fc7\u7a0b\u662f\u4ec0\u4e48"
+            ),
+            "retrieval_intent": "execution_flow",
+            "preferred_tools": ["execution_trace"],
+            "reason": "follow-up resolved from history",
+        }
+
+    monkeypatch.setattr(query_resolver, "_invoke_json", fake_invoke_json)
+
+    resolution = query_resolver.resolve_contextual_query(
+        question="\u8be6\u7ec6\u8fc7\u7a0b\u662f\u4ec0\u4e48",
+        conversation_history=[
+            {
+                "role": "user",
+                "content": (
+                    "\u8bf7\u95ee\u5e7f\u70b9\u901a\u4e5d\u56fe"
+                    "\u7d20\u6750\u6d88\u8017\u6570\u636e\u662f"
+                    "\u901a\u8fc7\u54ea\u4e2aJob\u5165\u5e93\u7684"
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": (
+                    "\u901a\u8fc7 `tencentNineImageMappingHandler` "
+                    "\u8fd9\u4e2a Job \u5165\u5e93\u3002"
+                ),
+            },
+        ],
+    )
+
+    assert resolution["rewritten_question"] == (
+        "tencentNineImageMappingHandler "
+        "\u8be6\u7ec6\u8fc7\u7a0b\u662f\u4ec0\u4e48"
+    )
+    assert "Current question:" in captured["prompt"]
+    assert "Recent conversation:" in captured["prompt"]
+    assert "tencentNineImageMappingHandler" in captured["prompt"]
+    assert resolution["preferred_tools"] == ["execution_trace"]
+
+
+def test_query_resolver_returns_default_without_history() -> None:
+    resolution = query_resolver.resolve_contextual_query(
+        "\u8ba2\u5355\u670d\u52a1\u6709\u54ea\u4e9bHTTP\u63a5\u53e3",
+        [],
+    )
+
+    assert resolution["rewritten_question"] == (
+        "\u8ba2\u5355\u670d\u52a1\u6709\u54ea\u4e9bHTTP\u63a5\u53e3"
+    )
+    assert resolution["is_follow_up"] is False
 
 
 def test_task_planning_config_drives_default_steps() -> None:

@@ -7,15 +7,18 @@ from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import Text, or_, select
+from sqlalchemy.sql.elements import ColumnElement
 
 from springgraph.db import session_scope
 from springgraph.models import Edge, File, Symbol
 from springgraph.rag.config.loader import (
+    load_aggregation_specs,
+    load_execution_trace_config,
     load_intent_configs,
     load_scope_fallback_config,
     load_target_trace_config,
 )
-from springgraph.rag.config.models import ToolConfig
+from springgraph.rag.config.models import AggregationSpecConfig, ToolConfig
 from springgraph.rag.intent import TABLE_RETRIEVAL_INTENTS, infer_query_intent
 from springgraph.rag.library_hints import load_query_hints
 from springgraph.rag.schemas import RagEvidence, SourceSnippet
@@ -89,6 +92,7 @@ class _MethodSource:
     start_line: int
     end_line: int
     content: str
+
 
 @dataclass(frozen=True)
 class ArtifactSearchTool:
@@ -244,6 +248,28 @@ class AggregateQueryTool:
     def invoke(self, tool_input: ToolInput) -> ToolResult:
         group_by = _optional_string(tool_input.filters.get("group_by"))
         explicit_intent = _optional_string(tool_input.filters.get("intent"))
+        spec = _aggregation_spec_for(group_by)
+        if spec is not None:
+            if spec.group_by == "table":
+                return _aggregate_tables(self.config, tool_input)
+            return _aggregate_by_spec(self.config, tool_input, spec)
+        if group_by:
+            artifact_spec = _aggregation_spec_for("artifact")
+            if artifact_spec is not None:
+                result = _aggregate_by_spec(self.config, tool_input, artifact_spec)
+                return ToolResult(
+                    tool_name=result.tool_name,
+                    summary=(
+                        f"Unsupported aggregate group_by={group_by!r}; "
+                        f"fell back to group_by='artifact'. {result.summary}"
+                    ),
+                    evidence=result.evidence,
+                    source_snippets=result.source_snippets,
+                    warnings=[
+                        *result.warnings,
+                        f"Unsupported aggregate group_by: {group_by}",
+                    ],
+                )
         intent = infer_query_intent(
             query=tool_input.query,
             explicit_intent=explicit_intent,
@@ -508,6 +534,12 @@ def _resolve_execution_targets(
 ) -> list[tuple[Symbol, File]]:
     if not target_terms:
         return []
+    annotation_target_rows = _resolve_annotation_execution_targets(
+        session=session,
+        project_id=project_id,
+        target_terms=target_terms,
+        limit=limit,
+    )
     filters = []
     for term in target_terms[:8]:
         pattern = f"%{term}%"
@@ -519,7 +551,7 @@ def _resolve_execution_targets(
                 File.path.ilike(pattern),
             ]
         )
-    rows = session.execute(
+    method_rows = session.execute(
         select(Symbol, File)
         .join(File, File.id == Symbol.file_id)
         .where(Symbol.project_id == project_id)
@@ -527,7 +559,66 @@ def _resolve_execution_targets(
         .where(or_(*filters))
         .limit(limit)
     ).all()
-    return _rank_execution_target_rows(rows, target_terms)
+    return _merge_ranked_execution_targets(
+        annotation_target_rows,
+        _rank_execution_target_rows(method_rows, target_terms),
+    )[:limit]
+
+
+def _resolve_annotation_execution_targets(
+    session: Any,
+    project_id: str,
+    target_terms: list[str],
+    limit: int,
+) -> list[tuple[Symbol, File]]:
+    filters = []
+    for term in target_terms[:8]:
+        pattern = f"%{term}%"
+        filters.extend(
+            [
+                Symbol.name.ilike(pattern),
+                Symbol.qualified_name.ilike(pattern),
+                Symbol.meta.cast(Text).ilike(pattern),
+            ]
+        )
+    annotation_rows = session.execute(
+        select(Symbol)
+        .where(Symbol.project_id == project_id)
+        .where(Symbol.kind == "annotation_usage")
+        .where(or_(*filters))
+        .limit(limit)
+    ).scalars()
+    target_ids = [
+        target_id
+        for symbol in annotation_rows
+        if isinstance(symbol.meta, dict)
+        if isinstance(target_id := symbol.meta.get("target_symbol_id"), str)
+    ]
+    if not target_ids:
+        return []
+    rows = session.execute(
+        select(Symbol, File)
+        .join(File, File.id == Symbol.file_id)
+        .where(Symbol.project_id == project_id)
+        .where(Symbol.id.in_(target_ids))
+        .limit(limit)
+    ).all()
+    order = {target_id: index for index, target_id in enumerate(target_ids)}
+    return sorted(rows, key=lambda row: order.get(row[0].id, len(order)))
+
+
+def _merge_ranked_execution_targets(
+    primary_rows: list[tuple[Symbol, File]],
+    fallback_rows: list[tuple[Symbol, File]],
+) -> list[tuple[Symbol, File]]:
+    rows: list[tuple[Symbol, File]] = []
+    seen: set[str] = set()
+    for symbol, file_row in [*primary_rows, *fallback_rows]:
+        if symbol.id in seen:
+            continue
+        seen.add(symbol.id)
+        rows.append((symbol, file_row))
+    return rows
 
 
 def _execution_target_candidates(
@@ -544,11 +635,21 @@ def _execution_target_candidates(
         lowered = term.lower()
         if lowered in generic:
             continue
+        if _is_execution_suffix_noise(term):
+            continue
         if len(term) < 3:
             continue
         if _looks_like_java_identifier(term):
             values.append(term)
     return _dedupe_terms(values)
+
+
+def _is_execution_suffix_noise(term: str) -> bool:
+    lowered = term.lower()
+    return any(
+        lowered == suffix.lower()
+        for suffix in load_execution_trace_config().entrypoint_suffixes
+    )
 
 
 def _looks_like_java_identifier(term: str) -> bool:
@@ -670,6 +771,7 @@ def _resolve_downstream_methods(
     method_names = _called_method_names(method_sources)
     if not method_names:
         return []
+    method_refs = _called_method_refs(method_sources)
     rows = session.execute(
         select(Symbol, File)
         .join(File, File.id == Symbol.file_id)
@@ -678,7 +780,7 @@ def _resolve_downstream_methods(
         .where(Symbol.name.in_(method_names[:80]))
         .limit(limit)
     ).all()
-    return _rank_downstream_rows(rows, method_sources, method_names)
+    return _rank_downstream_rows(rows, method_sources, method_names, method_refs)
 
 
 def _resolve_sql_statement_rows(
@@ -749,6 +851,12 @@ def _called_method_refs(method_sources: list[_MethodSource]) -> list[tuple[str, 
 
 def _receiver_mapper_name(receiver: str) -> str | None:
     if not receiver.lower().endswith("mapper"):
+        return None
+    return receiver[:1].upper() + receiver[1:]
+
+
+def _receiver_class_name(receiver: str) -> str | None:
+    if not receiver:
         return None
     return receiver[:1].upper() + receiver[1:]
 
@@ -825,6 +933,7 @@ def _rank_downstream_rows(
     rows: list[tuple[Symbol, File]],
     method_sources: list[_MethodSource],
     method_names: list[str],
+    method_refs: list[tuple[str, str]],
 ) -> list[tuple[Symbol, File]]:
     source_paths = {item.file_row.path for item in method_sources}
     source_classes = {
@@ -832,18 +941,26 @@ def _rank_downstream_rows(
         for item in method_sources
     }
     name_order = {name: index for index, name in enumerate(method_names)}
+    receiver_targets = {
+        (class_name, method): index
+        for index, (receiver, method) in enumerate(method_refs)
+        if (class_name := _receiver_class_name(receiver)) is not None
+    }
     source_ids = {item.symbol.id for item in method_sources}
 
     def rank(row: tuple[Symbol, File]) -> tuple[int, int, str, int]:
         symbol, file_row = row
-        if symbol.id in source_ids:
+        receiver_priority = _receiver_match_priority(symbol, receiver_targets)
+        if receiver_priority is not None:
+            priority = receiver_priority
+        elif symbol.id in source_ids:
             priority = 9
         elif file_row.path in source_paths:
-            priority = 0
+            priority = 2
         elif symbol.qualified_name.rsplit(".", maxsplit=1)[0] in source_classes:
-            priority = 1
+            priority = 3
         else:
-            priority = 4
+            priority = 6
         return (
             priority,
             name_order.get(symbol.name, len(name_order)),
@@ -852,6 +969,22 @@ def _rank_downstream_rows(
         )
 
     return sorted(rows, key=rank)
+
+
+def _receiver_match_priority(
+    symbol: Symbol,
+    receiver_targets: dict[tuple[str, str], int],
+) -> int | None:
+    for (class_name, method), _ in receiver_targets.items():
+        if symbol.name != method:
+            continue
+        if symbol.qualified_name.rsplit(".", maxsplit=1)[0].endswith(
+            f".{class_name}"
+        ):
+            return 0
+        if class_name in symbol.qualified_name:
+            return 1
+    return None
 
 
 def _trace_method_table_relations(
@@ -1002,12 +1135,17 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="ignore")
 
 
-def _aggregate_tables(config: ToolConfig, tool_input: ToolInput) -> ToolResult:
+def _aggregate_by_spec(
+    config: ToolConfig,
+    tool_input: ToolInput,
+    spec: AggregationSpecConfig,
+) -> ToolResult:
     module = _optional_string(tool_input.filters.get("module"))
     path_contains = _optional_string(tool_input.filters.get("path_contains"))
     query = _expand_query_with_library(tool_input.query, tool_input)
     inferred_module = _infer_module(tool_input.evidence)
-    limit = _limit(tool_input.top_k, multiplier=8)
+    output_limit = _limit(tool_input.top_k, multiplier=8)
+    candidate_limit = max(_limit(tool_input.top_k, multiplier=25), spec.candidate_limit)
 
     with session_scope() as session:
         resolved_module = _resolve_module(
@@ -1021,8 +1159,11 @@ def _aggregate_tables(config: ToolConfig, tool_input: ToolInput) -> ToolResult:
             select(Symbol, File)
             .join(File, File.id == Symbol.file_id)
             .where(Symbol.project_id == tool_input.project_id)
-            .where(Symbol.kind.in_(["db_table", "data_contract"]))
+            .where(Symbol.kind.in_(spec.symbol_kinds))
         )
+        annotation_filter = _annotation_filter(spec)
+        if annotation_filter is not None:
+            statement = statement.where(annotation_filter)
         if resolved_module:
             pattern = f"%{resolved_module}%"
             statement = statement.where(
@@ -1036,12 +1177,14 @@ def _aggregate_tables(config: ToolConfig, tool_input: ToolInput) -> ToolResult:
         elif path_contains:
             statement = statement.where(File.path.ilike(f"%{path_contains}%"))
         row_results = session.execute(
-            statement.order_by(File.path, Symbol.kind, Symbol.name).limit(limit)
+            statement.order_by(File.path, Symbol.kind, Symbol.name).limit(
+                candidate_limit
+            )
         ).all()
         rows = [(symbol, file_row) for symbol, file_row in row_results]
-        rows = _rank_table_rows(rows, query)
+        rows = _rank_aggregation_rows(rows, query, spec)[:output_limit]
         fallback_evidence = []
-        if not rows and resolved_module:
+        if spec.group_by == "table" and not rows and resolved_module:
             fallback_evidence = _module_scope_fallback(
                 session=session,
                 project_id=tool_input.project_id,
@@ -1055,14 +1198,14 @@ def _aggregate_tables(config: ToolConfig, tool_input: ToolInput) -> ToolResult:
     evidence: list[RagEvidence] = []
     seen_tables: set[str] = set()
     for symbol, file_row in rows:
-        table_name = _metadata_string(symbol.meta, "table") or symbol.name
-        marker = f"{table_name}|{file_row.path}"
+        label_value = _aggregation_label_value(symbol, file_row, spec)
+        marker = f"{spec.group_by}|{label_value}|{file_row.path}|{symbol.start_line}"
         if marker in seen_tables:
             continue
         seen_tables.add(marker)
         evidence.append(
             RagEvidence(
-                evidence_type="table_usage",
+                evidence_type=spec.evidence_type,
                 source="aggregate",
                 file_path=file_row.path,
                 start_line=symbol.start_line,
@@ -1070,15 +1213,19 @@ def _aggregate_tables(config: ToolConfig, tool_input: ToolInput) -> ToolResult:
                 symbol=symbol.qualified_name,
                 score=1.0,
                 content_excerpt=(
-                    f"table={table_name}; artifact={symbol.name}; "
+                    f"{spec.label}={label_value}; artifact={symbol.name}; "
                     f"kind={symbol.kind}; module={file_row.module_name}; "
                     f"service={file_row.service_name}"
                 ),
                 metadata={
-                    "table": table_name,
+                    "group_by": spec.group_by,
+                    spec.label: label_value,
+                    "symbol_id": symbol.id,
                     "artifact_kind": symbol.kind,
+                    "name": symbol.name,
                     "module_name": file_row.module_name,
                     "service_name": file_row.service_name,
+                    "metadata": _json_safe(symbol.meta),
                 },
             )
         )
@@ -1086,7 +1233,8 @@ def _aggregate_tables(config: ToolConfig, tool_input: ToolInput) -> ToolResult:
     return ToolResult(
         tool_name=config.name,
         summary=(
-            f"Aggregate table query query={query!r}, module={module!r}, "
+            f"Aggregate {spec.group_by} query query={query!r}, "
+            f"module={module!r}, "
             f"resolved_module={resolved_module!r} returned "
             f"{len(evidence)} evidence items."
         ),
@@ -1094,43 +1242,172 @@ def _aggregate_tables(config: ToolConfig, tool_input: ToolInput) -> ToolResult:
     )
 
 
+def _aggregate_tables(config: ToolConfig, tool_input: ToolInput) -> ToolResult:
+    spec = _aggregation_spec_for("table")
+    if spec is None:
+        raise RuntimeError("Missing table aggregation spec.")
+    return _aggregate_by_spec(config, tool_input, spec)
+
+
 def _rank_table_rows(
     rows: list[tuple[Symbol, File]],
     query: str,
 ) -> list[tuple[Symbol, File]]:
-    terms = [term.lower() for term in _prioritized_terms(_query_terms(query))[:12]]
+    spec = _aggregation_spec_for("table")
+    if spec is None:
+        return rows
+    return _rank_aggregation_rows(rows, query, spec)
 
-    def rank(row: tuple[Symbol, File]) -> tuple[int, str, str]:
+
+def _rank_aggregation_rows(
+    rows: list[tuple[Symbol, File]],
+    query: str,
+    spec: AggregationSpecConfig,
+) -> list[tuple[Symbol, File]]:
+    terms = [term.lower() for term in _prioritized_terms(_query_terms(query))[:40]]
+
+    def rank(row: tuple[Symbol, File]) -> tuple[int, int, str, str]:
         symbol, file_row = row
-        table_name = (_metadata_string(symbol.meta, "table") or symbol.name).lower()
-        haystack = " ".join(
-            [
-                table_name,
-                symbol.name,
-                symbol.qualified_name,
-                file_row.path,
-                file_row.module_name or "",
-                file_row.service_name or "",
-            ]
-        ).lower()
+        label_value = _aggregation_label_value(symbol, file_row, spec).lower()
+        haystack = _aggregation_haystack(symbol, file_row, spec).lower()
         primary_match = any(
-            _matches_primary_table_name(table_name, term) for term in terms
+            _matches_primary_aggregation_name(label_value, term) for term in terms
         )
         if terms and primary_match:
             priority = 0
-        elif terms and any(term in table_name for term in terms):
+        elif terms and any(term in label_value for term in terms):
             priority = 1
         elif terms and any(term in haystack for term in terms):
             priority = 2
         else:
             priority = 5
-        return (priority, file_row.path, symbol.name)
+        score = sum(
+            _aggregation_term_score(term, haystack, label_value)
+            for term in terms
+        )
+        return (priority, -score, file_row.path, symbol.name)
 
     return sorted(rows, key=rank)
 
 
-def _matches_primary_table_name(table_name: str, term: str) -> bool:
-    return table_name == term or table_name.endswith(f"_{term}")
+def _matches_primary_aggregation_name(name: str, term: str) -> bool:
+    return name == term or name.endswith(f"_{term}") or name.endswith(f"-{term}")
+
+
+def _aggregation_spec_for(group_by: str | None) -> AggregationSpecConfig | None:
+    if group_by is None:
+        return None
+    normalized = group_by.strip().lower().replace("-", "_")
+    for spec in load_aggregation_specs():
+        aliases = (spec.group_by, *spec.aliases)
+        if normalized in {alias.strip().lower().replace("-", "_") for alias in aliases}:
+            return spec
+    return None
+
+
+def _annotation_filter(spec: AggregationSpecConfig) -> ColumnElement[bool] | None:
+    if not spec.annotation_names:
+        return None
+    filters = []
+    for annotation_name in spec.annotation_names:
+        filters.extend(
+            [
+                Symbol.name.ilike(f"@{annotation_name}%"),
+                Symbol.qualified_name.ilike(f"%:{annotation_name}:%"),
+                Symbol.meta.cast(Text).ilike(
+                    f'%"annotation": "{annotation_name}"%'
+                ),
+            ]
+        )
+    if set(spec.symbol_kinds) == {"annotation_usage"}:
+        return or_(*filters)
+    return or_(Symbol.kind != "annotation_usage", *filters)
+
+
+def _aggregation_label_value(
+    symbol: Symbol,
+    file_row: File,
+    spec: AggregationSpecConfig,
+) -> str:
+    for path in spec.metadata_label_paths:
+        value = _metadata_path_string(symbol.meta, path)
+        if value:
+            return value
+    if spec.group_by == "module":
+        return (
+            file_row.module_name
+            or file_row.service_name
+            or _path_root(file_row.path)
+            or symbol.name
+        )
+    if spec.group_by == "api":
+        route_path = _metadata_path_string(symbol.meta, "path")
+        http_method = _metadata_path_string(symbol.meta, "http_method")
+        if route_path and http_method:
+            return f"{http_method} {route_path}"
+        if route_path:
+            return route_path
+    return _clean_symbol_label(symbol.name, spec)
+
+
+def _metadata_path_string(metadata: object, path: str) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    value: object = metadata
+    for part in path.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _clean_symbol_label(name: str, spec: AggregationSpecConfig) -> str:
+    value = name.strip()
+    if spec.group_by == "job" and value.startswith("@XxlJob"):
+        return value.removeprefix("@XxlJob").strip() or value
+    if value.startswith("@"):
+        parts = value.split(maxsplit=1)
+        if len(parts) == 2:
+            return parts[1].strip()
+    return value
+
+
+def _aggregation_haystack(
+    symbol: Symbol,
+    file_row: File,
+    spec: AggregationSpecConfig,
+) -> str:
+    metadata = symbol.meta if isinstance(symbol.meta, dict) else {}
+    values = [
+        spec.group_by,
+        spec.label,
+        _aggregation_label_value(symbol, file_row, spec),
+        symbol.name,
+        symbol.qualified_name,
+        symbol.kind,
+        symbol.signature or "",
+        file_row.path,
+        file_row.module_name or "",
+        file_row.service_name or "",
+        json.dumps(_json_safe(metadata), ensure_ascii=False, sort_keys=True),
+    ]
+    return " ".join(value for value in values if value)
+
+
+def _aggregation_term_score(term: str, haystack: str, label_value: str) -> int:
+    if len(term) < 2:
+        return 0
+    if term == label_value:
+        return 100
+    if label_value.endswith(f"_{term}") or label_value.endswith(f"-{term}"):
+        return 80
+    if term in label_value:
+        return 50 + min(len(term), 20)
+    if term in haystack:
+        return 20 + min(len(term), 20)
+    return 0
 
 
 def _module_scope_fallback(
@@ -1716,11 +1993,55 @@ def _query_terms(query: str) -> list[str]:
         cleaned = match.strip(".,;:()[]{}<>\"'")
         if cleaned:
             terms.append(cleaned)
+            terms.extend(_ascii_subterms(cleaned))
+    terms.extend(_cjk_ngrams(query))
     for raw in query.split():
         cleaned = raw.strip(".,;:()[]{}<>\"'")
         if cleaned and cleaned not in terms:
             terms.append(cleaned)
     return _dedupe_terms(terms)
+
+
+def _ascii_subterms(token: str) -> list[str]:
+    normalized = re.sub(r"[^A-Za-z0-9]+", " ", token)
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", normalized)
+    return [
+        item
+        for item in spaced.split()
+        if len(item) >= 3 and not item.isdigit()
+    ]
+
+
+def _cjk_ngrams(text: str) -> list[str]:
+    runs: list[str] = []
+    current: list[str] = []
+    for char in text:
+        if _is_cjk(char):
+            current.append(char)
+        elif current:
+            runs.append("".join(current))
+            current = []
+    if current:
+        runs.append("".join(current))
+
+    terms: list[str] = []
+    for run in runs:
+        if len(run) <= 1:
+            continue
+        for size in range(2, min(4, len(run)) + 1):
+            terms.extend(
+                run[index : index + size]
+                for index in range(0, len(run) - size + 1)
+            )
+    return terms
+
+
+def _is_cjk(char: str) -> bool:
+    return (
+        "\u3400" <= char <= "\u4dbf"
+        or "\u4e00" <= char <= "\u9fff"
+        or "\uf900" <= char <= "\ufaff"
+    )
 
 
 def _dedupe_terms(terms: list[str]) -> list[str]:

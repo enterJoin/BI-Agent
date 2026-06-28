@@ -3,6 +3,7 @@
 from typing import Any, TypedDict
 
 from springgraph.rag.config.models import AgenticRagConfig, ToolConfig
+from springgraph.rag.query_resolver import QueryResolution
 from springgraph.rag.schemas import RagEvidence, SourceSnippet
 from springgraph.rag.tools.schemas import ToolResult
 
@@ -17,6 +18,7 @@ class QuestionUnderstanding(TypedDict, total=False):
     technical_terms: list[str]
     entities: list[str]
     expected_evidence: list[str]
+    rewritten_query: str
 
 
 class PlanStep(TypedDict, total=False):
@@ -44,6 +46,8 @@ class AgenticRagState(TypedDict, total=False):
     project_path: str
     project_id: str
     question: str
+    contextual_question: str
+    query_resolution: QueryResolution
     title: str | None
     top_k: int
     graph_depth: int

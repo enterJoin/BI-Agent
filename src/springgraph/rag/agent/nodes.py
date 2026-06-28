@@ -8,6 +8,7 @@ from springgraph.rag.agent.state import AgenticRagState, PlanStep
 from springgraph.rag.config.loader import load_agentic_rag_config
 from springgraph.rag.llm import invoke_agent_model
 from springgraph.rag.memory.store import get_thread, update_thread
+from springgraph.rag.query_resolver import resolve_contextual_query
 from springgraph.rag.schemas import RagEvidence, SourceSnippet
 from springgraph.rag.target_trace import source_priority
 from springgraph.rag.task_planning import task_planning_source_priority
@@ -77,16 +78,33 @@ def load_thread_memory(state: AgenticRagState) -> AgenticRagState:
 
 def plan_retrieval(state: AgenticRagState) -> AgenticRagState:
     """Create question understanding and one structured retrieval plan."""
-    # TODO: Make question understanding context-aware by passing concise thread
-    # memory, recent evidence, recent symbols, and project library hints.
+    question_for_planning = state.get("contextual_question") or state["question"]
     understanding, retrieval_plan = planner.plan_question_retrieval(
-        question=state["question"],
+        question=question_for_planning,
         available_tools=state["tool_configs"],
         source_available=state.get("source_available", False),
         memory_observations=state.get("observations", []),
     )
+    if question_for_planning != state["question"]:
+        understanding["rewritten_query"] = question_for_planning
     state["question_understanding"] = understanding
     state["retrieval_plan"] = retrieval_plan
+    return state
+
+
+def resolve_query_context(state: AgenticRagState) -> AgenticRagState:
+    """Resolve follow-up questions into standalone retrieval questions."""
+    resolution = resolve_contextual_query(
+        question=state["question"],
+        conversation_history=state.get("conversation_history", []),
+    )
+    contextual_question = resolution.get("rewritten_question") or state["question"]
+    state["query_resolution"] = resolution
+    state["contextual_question"] = contextual_question
+    if contextual_question != state["question"]:
+        state["observations"].append(
+            f"Contextual query resolved: {contextual_question}"
+        )
     return state
 
 

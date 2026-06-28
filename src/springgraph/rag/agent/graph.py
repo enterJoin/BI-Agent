@@ -26,6 +26,7 @@ def build_agentic_rag_graph() -> RunnableAgenticGraph:
     graph.add_node("load_runtime_config", nodes.load_runtime_config)
     graph.add_node("apply_request_defaults", nodes.apply_request_defaults)
     graph.add_node("load_thread_memory", nodes.load_thread_memory)
+    graph.add_node("resolve_query_context", nodes.resolve_query_context)
     graph.add_node("plan_retrieval", nodes.plan_retrieval)
     graph.add_node("execute_retrieval_plan", nodes.execute_retrieval_plan)
     graph.add_node("generate_final_answer", nodes.generate_final_answer)
@@ -34,7 +35,8 @@ def build_agentic_rag_graph() -> RunnableAgenticGraph:
     graph.add_edge(START, "load_runtime_config")
     graph.add_edge("load_runtime_config", "apply_request_defaults")
     graph.add_edge("apply_request_defaults", "load_thread_memory")
-    graph.add_edge("load_thread_memory", "plan_retrieval")
+    graph.add_edge("load_thread_memory", "resolve_query_context")
+    graph.add_edge("resolve_query_context", "plan_retrieval")
     graph.add_edge("plan_retrieval", "execute_retrieval_plan")
     graph.add_edge("execute_retrieval_plan", "generate_final_answer")
     graph.add_edge("generate_final_answer", "persist_turn_memory")
@@ -51,6 +53,7 @@ class _FallbackAgenticGraph:
             nodes.load_runtime_config,
             nodes.apply_request_defaults,
             nodes.load_thread_memory,
+            nodes.resolve_query_context,
             nodes.plan_retrieval,
             nodes.execute_retrieval_plan,
         ):

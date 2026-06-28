@@ -1,0 +1,550 @@
+aggregation_specs:
+  - group_by: table
+    aliases:
+      - table
+      - tables
+      - table_name
+      - db_table
+    symbol_kinds:
+      - db_table
+      - data_contract
+    evidence_type: table_usage
+    label: table
+    metadata_label_paths:
+      - table
+    candidate_limit: 1000
+
+  - group_by: data_contract
+    aliases:
+      - data_contract
+      - data_contracts
+      - entity_contract
+    symbol_kinds:
+      - data_contract
+    evidence_type: data_contract_entry
+    label: data_contract
+    metadata_label_paths:
+      - table
+      - name
+    candidate_limit: 1000
+
+  - group_by: database_column
+    aliases:
+      - database_column
+      - database_columns
+      - db_column
+      - db_columns
+      - column
+      - columns
+    symbol_kinds:
+      - db_column
+    evidence_type: database_column_entry
+    label: column
+    metadata_label_paths:
+      - column
+      - name
+    candidate_limit: 1000
+
+  - group_by: sql_statement
+    aliases:
+      - sql_statement
+      - sql_statements
+      - sql_operation
+      - sql_operations
+      - db_operation
+      - db_operations
+      - sql
+    symbol_kinds:
+      - sql_statement
+    evidence_type: sql_statement_entry
+    label: sql_statement
+    metadata_label_paths:
+      - id
+      - statement_id
+      - operation
+    path_hints:
+      - mapper
+      - xml
+    candidate_limit: 1000
+
+  - group_by: mapper
+    aliases:
+      - mapper
+      - mappers
+      - mybatis
+    symbol_kinds:
+      - mapper
+      - interface
+    evidence_type: mapper_entry
+    label: mapper
+    path_hints:
+      - mapper
+      - xml
+    candidate_limit: 1000
+
+  - group_by: job
+    aliases:
+      - job
+      - jobs
+      - job_name
+      - xxljob
+      - scheduled_job
+      - scheduled_task
+      - scheduler
+      - task
+    symbol_kinds:
+      - annotation_usage
+    evidence_type: job_entrypoint
+    label: job
+    metadata_label_paths:
+      - values.value
+    annotation_names:
+      - XxlJob
+    path_hints:
+      - job
+      - quartz
+      - schedule
+    candidate_limit: 1000
+
+  - group_by: api
+    aliases:
+      - api
+      - apis
+      - http
+      - endpoint
+      - endpoints
+    symbol_kinds:
+      - route
+      - annotation_usage
+    evidence_type: api_entrypoint
+    label: api
+    metadata_label_paths:
+      - path
+      - values.value
+      - values.path
+    annotation_names:
+      - RequestMapping
+      - GetMapping
+      - PostMapping
+      - PutMapping
+      - DeleteMapping
+      - PatchMapping
+    path_hints:
+      - controller
+      - api
+      - route
+    candidate_limit: 1000
+
+  - group_by: route
+    aliases:
+      - route
+      - routes
+      - http_route
+      - http_routes
+    symbol_kinds:
+      - route
+    evidence_type: route_entry
+    label: route
+    metadata_label_paths:
+      - path
+      - values.value
+      - values.path
+    path_hints:
+      - controller
+      - route
+    candidate_limit: 1000
+
+  - group_by: controller
+    aliases:
+      - controller
+      - controllers
+      - rest_controller
+      - handler
+    symbol_kinds:
+      - route
+      - annotation_usage
+    evidence_type: controller_entry
+    label: controller
+    metadata_label_paths:
+      - target_qualified_name
+      - path
+      - values.value
+    annotation_names:
+      - Controller
+      - RestController
+      - RequestMapping
+    path_hints:
+      - controller
+    candidate_limit: 1000
+
+  - group_by: module
+    aliases:
+      - module
+      - modules
+    symbol_kinds:
+      - file
+      - class
+      - interface
+      - route
+      - db_table
+    evidence_type: module_artifact
+    label: module
+    metadata_label_paths:
+      - module_name
+      - service_name
+    candidate_limit: 1000
+
+  - group_by: service
+    aliases:
+      - service
+      - services
+      - spring_service
+      - spring_services
+    symbol_kinds:
+      - service
+    evidence_type: service_entry
+    label: service
+    metadata_label_paths:
+      - service_name
+      - module_name
+    candidate_limit: 1000
+
+  - group_by: remote_service
+    aliases:
+      - remote_service
+      - remote_services
+      - downstream_service
+      - downstream_services
+      - feign_service
+      - feign_services
+    symbol_kinds:
+      - remote_service
+    evidence_type: remote_service_entry
+    label: remote_service
+    metadata_label_paths:
+      - service
+      - service_name
+      - module_name
+    candidate_limit: 1000
+
+  - group_by: class
+    aliases:
+      - class
+      - classes
+      - type
+      - types
+    symbol_kinds:
+      - class
+    evidence_type: class_entry
+    label: class
+    candidate_limit: 1000
+
+  - group_by: interface
+    aliases:
+      - interface
+      - interfaces
+      - java_interface
+      - java_interfaces
+    symbol_kinds:
+      - interface
+    evidence_type: interface_entry
+    label: interface
+    candidate_limit: 1000
+
+  - group_by: method
+    aliases:
+      - method
+      - methods
+      - function
+      - functions
+    symbol_kinds:
+      - method
+    evidence_type: method_entry
+    label: method
+    candidate_limit: 1000
+
+  - group_by: constructor
+    aliases:
+      - constructor
+      - constructors
+    symbol_kinds:
+      - constructor
+    evidence_type: constructor_entry
+    label: constructor
+    candidate_limit: 500
+
+  - group_by: field
+    aliases:
+      - field
+      - fields
+      - java_field
+      - java_fields
+    symbol_kinds:
+      - field
+    evidence_type: field_entry
+    label: field
+    metadata_label_paths:
+      - values.value
+      - type
+    candidate_limit: 1000
+
+  - group_by: parameter
+    aliases:
+      - parameter
+      - parameters
+      - param
+      - params
+      - argument
+      - arguments
+    symbol_kinds:
+      - parameter
+    evidence_type: parameter_entry
+    label: parameter
+    metadata_label_paths:
+      - values.value
+      - type
+    candidate_limit: 1000
+
+  - group_by: annotation
+    aliases:
+      - annotation
+      - annotations
+      - decorator
+      - decorators
+    symbol_kinds:
+      - annotation_usage
+    evidence_type: annotation_entry
+    label: annotation
+    metadata_label_paths:
+      - annotation
+      - values.value
+    candidate_limit: 1000
+
+  - group_by: annotation_usage
+    aliases:
+      - annotation_usage
+      - annotation_usages
+      - raw_annotation
+      - raw_annotations
+    symbol_kinds:
+      - annotation_usage
+    evidence_type: annotation_usage_entry
+    label: annotation_usage
+    metadata_label_paths:
+      - annotation
+      - values.value
+    candidate_limit: 1000
+
+  - group_by: config
+    aliases:
+      - config
+      - configs
+      - configuration
+      - property
+      - properties
+    symbol_kinds:
+      - config
+    evidence_type: config_entry
+    label: config
+    metadata_label_paths:
+      - key
+      - name
+    candidate_limit: 1000
+
+  - group_by: bean
+    aliases:
+      - bean
+      - beans
+      - spring_bean
+      - spring_beans
+    symbol_kinds:
+      - bean
+    evidence_type: bean_entry
+    label: bean
+    metadata_label_paths:
+      - bean
+      - class
+    candidate_limit: 1000
+
+  - group_by: enum
+    aliases:
+      - enum
+      - enums
+      - enumeration
+      - enumerations
+    symbol_kinds:
+      - enum
+    evidence_type: enum_entry
+    label: enum
+    candidate_limit: 1000
+
+  - group_by: package
+    aliases:
+      - package
+      - packages
+      - java_package
+      - java_packages
+    symbol_kinds:
+      - package
+    evidence_type: package_entry
+    label: package
+    candidate_limit: 500
+
+  - group_by: import
+    aliases:
+      - import
+      - imports
+      - java_import
+      - java_imports
+    symbol_kinds:
+      - import
+    evidence_type: import_entry
+    label: import
+    candidate_limit: 300
+
+  - group_by: cache_key
+    aliases:
+      - cache_key
+      - cache_keys
+      - redis_key
+      - redis_keys
+    symbol_kinds:
+      - cache_key
+    evidence_type: cache_key_entry
+    label: cache_key
+    metadata_label_paths:
+      - cache_key
+      - key
+      - name
+    candidate_limit: 300
+
+  - group_by: mq_topic
+    aliases:
+      - mq_topic
+      - mq_topics
+      - message_topic
+      - message_topics
+      - kafka_topic
+      - kafka_topics
+      - topic
+      - topics
+    symbol_kinds:
+      - mq_topic
+    evidence_type: mq_topic_entry
+    label: mq_topic
+    metadata_label_paths:
+      - topic
+      - name
+    candidate_limit: 300
+
+  - group_by: mq_queue
+    aliases:
+      - mq_queue
+      - mq_queues
+      - message_queue
+      - message_queues
+      - queue
+      - queues
+    symbol_kinds:
+      - mq_queue
+    evidence_type: mq_queue_entry
+    label: mq_queue
+    metadata_label_paths:
+      - queue
+      - name
+    candidate_limit: 300
+
+  - group_by: mq_exchange
+    aliases:
+      - mq_exchange
+      - mq_exchanges
+      - message_exchange
+      - message_exchanges
+      - exchange
+      - exchanges
+    symbol_kinds:
+      - mq_exchange
+    evidence_type: mq_exchange_entry
+    label: mq_exchange
+    metadata_label_paths:
+      - exchange
+      - name
+    candidate_limit: 300
+
+  - group_by: permission_rule
+    aliases:
+      - permission_rule
+      - permission_rules
+      - permission
+      - permissions
+      - auth_rule
+      - auth_rules
+    symbol_kinds:
+      - permission_rule
+    evidence_type: permission_rule_entry
+    label: permission_rule
+    metadata_label_paths:
+      - permission
+      - rule_kind
+      - name
+    candidate_limit: 1000
+
+  - group_by: oauth_provider
+    aliases:
+      - oauth_provider
+      - oauth_providers
+      - oauth
+      - auth_provider
+      - auth_providers
+    symbol_kinds:
+      - oauth_provider
+    evidence_type: oauth_provider_entry
+    label: oauth_provider
+    metadata_label_paths:
+      - provider
+      - name
+    candidate_limit: 300
+
+  - group_by: resource
+    aliases:
+      - resource
+      - resources
+      - external_resource
+      - external_resources
+    symbol_kinds:
+      - resource
+    evidence_type: resource_entry
+    label: resource
+    metadata_label_paths:
+      - normalized_name
+      - resource_type
+      - name
+    candidate_limit: 300
+
+  - group_by: file
+    aliases:
+      - file
+      - files
+      - source_file
+      - source_files
+    symbol_kinds:
+      - file
+    evidence_type: file_entry
+    label: file
+    candidate_limit: 1000
+
+  - group_by: artifact
+    aliases:
+      - artifact
+      - artifacts
+      - symbol
+      - symbols
+    symbol_kinds:
+      - class
+      - interface
+      - method
+      - annotation_usage
+      - config
+    evidence_type: artifact_match
+    label: artifact
+    candidate_limit: 1000

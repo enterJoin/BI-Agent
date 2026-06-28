@@ -119,6 +119,12 @@ def stream_ask_project(request: RagRequest) -> Iterator[RagStreamEvent]:
     state = nodes.load_runtime_config(state)
     state = nodes.apply_request_defaults(state)
     state = nodes.load_thread_memory(state)
+    state = nodes.resolve_query_context(state)
+    yield _event(
+        "query_resolution",
+        query_resolution=state.get("query_resolution", {}),
+        contextual_question=state.get("contextual_question", question),
+    )
     yield _event(
         "status",
         stage="planning",
@@ -128,6 +134,8 @@ def stream_ask_project(request: RagRequest) -> Iterator[RagStreamEvent]:
     state = nodes.plan_retrieval(state)
     yield _event(
         "plan",
+        query_resolution=state.get("query_resolution", {}),
+        contextual_question=state.get("contextual_question", question),
         question_understanding=state.get("question_understanding", {}),
         retrieval_plan=state.get("retrieval_plan", {}),
     )
@@ -225,14 +233,23 @@ def _answer_from_state(
 ) -> RagAnswer:
     understanding = final_state.get("question_understanding", {})
     intent = str(understanding.get("task_goal", "agentic_rag"))
-    expanded_queries = _agentic_expanded_queries(question, understanding)
+    rewritten_query = str(
+        final_state.get("contextual_question")
+        or understanding.get("rewritten_query")
+        or question
+    )
+    expanded_queries = _agentic_expanded_queries(
+        question=question,
+        understanding=understanding,
+        rewritten_query=rewritten_query,
+    )
     return RagAnswer(
         answer=final_state["answer"],
         thread_id=thread_id,
         project_id=project_id_value,
         project_path=str(project_path),
         intent=intent,
-        rewritten_query=question,
+        rewritten_query=rewritten_query,
         expanded_queries=expanded_queries,
         used_vector_search=False,
         used_relational_search=bool(
@@ -316,10 +333,13 @@ def source_snippet_to_dict(item: SourceSnippet) -> dict[str, object]:
 def _agentic_expanded_queries(
     question: str,
     understanding: object,
+    rewritten_query: str | None = None,
 ) -> list[str]:
     if not isinstance(understanding, dict):
-        return [question]
+        return [query for query in (question, rewritten_query) if query]
     values: list[str] = [question]
+    if rewritten_query:
+        values.append(rewritten_query)
     for key in ("business_terms", "technical_terms", "entities", "sub_questions"):
         raw = understanding.get(key)
         if isinstance(raw, list):

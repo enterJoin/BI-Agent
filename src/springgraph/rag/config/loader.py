@@ -8,6 +8,7 @@ import yaml
 
 from springgraph.rag.config.models import (
     AgenticRagConfig,
+    AggregationSpecConfig,
     ContextConfig,
     ExecutionTraceConfig,
     IntentConfig,
@@ -59,6 +60,43 @@ def load_tool_configs() -> list[ToolConfig]:
             )
         )
     return [tool for tool in tools if tool.enabled]
+
+
+@lru_cache(maxsize=1)
+def load_aggregation_specs() -> tuple[AggregationSpecConfig, ...]:
+    """Load aggregate_query group-by dimensions."""
+    data = _load_yaml(_config_path("aggregation.yml"))
+    raw_specs = data.get("aggregation_specs")
+    if not isinstance(raw_specs, list):
+        return ()
+    specs: list[AggregationSpecConfig] = []
+    for raw_item in raw_specs:
+        if not isinstance(raw_item, dict):
+            continue
+        group_by = str(raw_item.get("group_by", "")).strip()
+        symbol_kinds = tuple(_string_list(raw_item.get("symbol_kinds")))
+        evidence_type = str(raw_item.get("evidence_type", "")).strip()
+        label = str(raw_item.get("label", group_by)).strip()
+        if not group_by or not symbol_kinds or not evidence_type or not label:
+            continue
+        specs.append(
+            AggregationSpecConfig(
+                group_by=group_by,
+                aliases=tuple(_string_list(raw_item.get("aliases"))),
+                symbol_kinds=symbol_kinds,
+                evidence_type=evidence_type,
+                label=label,
+                metadata_label_paths=tuple(
+                    _string_list(raw_item.get("metadata_label_paths"))
+                ),
+                annotation_names=tuple(
+                    _string_list(raw_item.get("annotation_names"))
+                ),
+                path_hints=tuple(_string_list(raw_item.get("path_hints"))),
+                candidate_limit=_int_value(raw_item.get("candidate_limit"), 200),
+            )
+        )
+    return tuple(specs)
 
 
 @lru_cache(maxsize=1)

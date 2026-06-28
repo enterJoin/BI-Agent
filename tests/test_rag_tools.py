@@ -2,7 +2,11 @@ from pathlib import Path
 from typing import Any
 
 from springgraph.models import Edge, File, Symbol
-from springgraph.rag.config.models import ScopeFallbackConfig, ToolConfig
+from springgraph.rag.config.models import (
+    AggregationSpecConfig,
+    ScopeFallbackConfig,
+    ToolConfig,
+)
 from springgraph.rag.schemas import RagEvidence
 from springgraph.rag.tools import implementations
 from springgraph.rag.tools.implementations import (
@@ -69,6 +73,248 @@ def test_aggregate_query_treats_store_question_as_table_query(
     )
     assert result.summary == "table aggregation"
     assert result.evidence[0].symbol == "db_table:oms_order"
+
+
+def test_aggregate_query_groups_jobs_without_table_aggregation(
+    monkeypatch: object,
+) -> None:
+    job = Symbol(
+        id="job-symbol",
+        project_id="project-1",
+        file_id="job-file",
+        kind="annotation_usage",
+        name="@XxlJob tencentMaterialReportHandler",
+        qualified_name=(
+            "annotation_usage:XxlJob:tencentMaterialReportHandler:"
+            "com.demo.TencentReportJob.tencentMaterialReportHandler:0"
+        ),
+        start_line=65,
+        end_line=65,
+        meta={
+            "annotation": "XxlJob",
+            "values": {"value": "tencentMaterialReportHandler"},
+            "target_qualified_name": (
+                "com.demo.TencentReportJob.tencentMaterialReportHandler"
+            ),
+        },
+    )
+    file_row = File(
+        id="job-file",
+        project_id="project-1",
+        path="demo/src/main/java/com/demo/quartz/TencentReportJob.java",
+        module_name="demo",
+        service_name="demo",
+        language="java",
+        content_hash="hash",
+        size_bytes=1,
+    )
+
+    class FakeRows:
+        def all(self) -> list[tuple[Symbol, File]]:
+            return [(job, file_row)]
+
+    class FakeSession:
+        def execute(self, statement: object) -> FakeRows:
+            return FakeRows()
+
+    class FakeScope:
+        def __enter__(self) -> FakeSession:
+            return FakeSession()
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    def fail_aggregate_tables(
+        config: ToolConfig,
+        tool_input: ToolInput,
+    ) -> ToolResult:
+        raise AssertionError("job aggregation must not use table aggregation")
+
+    monkeypatch.setattr(implementations, "session_scope", lambda: FakeScope())
+    monkeypatch.setattr(implementations, "_resolve_module", lambda **_: "demo")
+    monkeypatch.setattr(implementations, "_aggregate_tables", fail_aggregate_tables)
+
+    tool = AggregateQueryTool(
+        ToolConfig(
+            name="aggregate_query",
+            description="",
+            capabilities=[],
+            requires=["project_id"],
+        )
+    )
+
+    result = tool.invoke(
+        ToolInput(
+            query="\u5e7f\u70b9\u901a\u4e5d\u56fe\u7d20\u6750\u6d88\u8017\u662f\u54ea\u4e2aJob\u5165\u5e93",
+            filters={"group_by": "job"},
+            project_id="project-1",
+            project_path=Path("F:/demo"),
+            top_k=8,
+            graph_depth=2,
+            source_available=True,
+            max_source_files=3,
+            max_source_lines=80,
+            source_line_padding=3,
+        )
+    )
+
+    assert result.evidence[0].evidence_type == "job_entrypoint"
+    assert result.evidence[0].metadata["job"] == "tencentMaterialReportHandler"
+    assert result.evidence[0].metadata["symbol_id"] == "job-symbol"
+
+
+def test_query_terms_adds_generic_cjk_ngrams() -> None:
+    terms = implementations._query_terms(
+        "\u5e7f\u70b9\u901a\u4e5d\u56fe\u7d20\u6750\u6d88\u8017\u6570\u636e "
+        "TencentReportService material_sync"
+    )
+
+    assert "\u5e7f\u70b9\u901a" in terms
+    assert "\u4e5d\u56fe" in terms
+    assert "\u7d20\u6750" in terms
+    assert "\u6d88\u8017" in terms
+    assert "Tencent" in terms
+    assert "Report" in terms
+    assert "Service" in terms
+    assert "material" in terms
+    assert "sync" in terms
+
+
+def test_execution_target_candidates_drop_bare_entrypoint_suffix() -> None:
+    candidates = implementations._execution_target_candidates(
+        "tencentNineImageMappingHandler \u8be6\u7ec6\u8fc7\u7a0b",
+        {},
+    )
+
+    assert "tencentNineImageMappingHandler" in candidates
+    assert "Handler" not in candidates
+
+
+def test_job_name_is_job_aggregation_alias() -> None:
+    spec = implementations._aggregation_spec_for("job_name")
+
+    assert spec is not None
+    assert spec.group_by == "job"
+
+
+def test_aggregation_config_covers_known_symbol_kinds() -> None:
+    configured_kinds = {
+        kind
+        for spec in implementations.load_aggregation_specs()
+        for kind in spec.symbol_kinds
+    }
+
+    assert {
+        "annotation_usage",
+        "bean",
+        "cache_key",
+        "class",
+        "config",
+        "constructor",
+        "data_contract",
+        "db_column",
+        "db_table",
+        "enum",
+        "field",
+        "file",
+        "import",
+        "interface",
+        "mapper",
+        "method",
+        "mq_exchange",
+        "mq_queue",
+        "mq_topic",
+        "oauth_provider",
+        "package",
+        "parameter",
+        "permission_rule",
+        "remote_service",
+        "resource",
+        "route",
+        "service",
+        "sql_statement",
+    } <= configured_kinds
+    assert "mybatis_statement" not in configured_kinds
+
+
+def test_aggregate_query_uses_configured_group_by_without_code_branch(
+    monkeypatch: object,
+) -> None:
+    controller = Symbol(
+        id="controller-symbol",
+        project_id="project-1",
+        file_id="controller-file",
+        kind="class",
+        name="OrderController",
+        qualified_name="com.demo.OrderController",
+        start_line=12,
+        end_line=80,
+        meta={},
+    )
+    file_row = File(
+        id="controller-file",
+        project_id="project-1",
+        path="demo/src/main/java/com/demo/OrderController.java",
+        module_name="demo",
+        service_name="demo",
+        language="java",
+        content_hash="hash",
+        size_bytes=1,
+    )
+
+    class FakeRows:
+        def all(self) -> list[tuple[Symbol, File]]:
+            return [(controller, file_row)]
+
+    class FakeSession:
+        def execute(self, statement: object) -> FakeRows:
+            return FakeRows()
+
+    class FakeScope:
+        def __enter__(self) -> FakeSession:
+            return FakeSession()
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    spec = AggregationSpecConfig(
+        group_by="controller",
+        aliases=("controllers",),
+        symbol_kinds=("class",),
+        evidence_type="controller_entry",
+        label="controller",
+    )
+    monkeypatch.setattr(implementations, "load_aggregation_specs", lambda: (spec,))
+    monkeypatch.setattr(implementations, "session_scope", lambda: FakeScope())
+    monkeypatch.setattr(implementations, "_resolve_module", lambda **_: None)
+
+    tool = AggregateQueryTool(
+        ToolConfig(
+            name="aggregate_query",
+            description="",
+            capabilities=[],
+            requires=["project_id"],
+        )
+    )
+
+    result = tool.invoke(
+        ToolInput(
+            query="order controllers",
+            filters={"group_by": "controllers"},
+            project_id="project-1",
+            project_path=Path("F:/demo"),
+            top_k=8,
+            graph_depth=2,
+            source_available=True,
+            max_source_files=3,
+            max_source_lines=80,
+            source_line_padding=3,
+        )
+    )
+
+    assert result.evidence[0].evidence_type == "controller_entry"
+    assert result.evidence[0].metadata["group_by"] == "controller"
+    assert result.evidence[0].metadata["controller"] == "OrderController"
 
 
 def test_target_trace_returns_target_and_write_relation(

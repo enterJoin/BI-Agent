@@ -96,6 +96,88 @@ def test_generate_final_answer_includes_conversation_history(
     assert "Evidence:" in captured["prompt"]
 
 
+def test_resolved_contextual_question_is_used_for_planning(
+    monkeypatch: object,
+) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_resolve_contextual_query(
+        question: str,
+        conversation_history: list[dict[str, str]],
+    ) -> dict[str, object]:
+        calls["resolver_question"] = question
+        calls["resolver_history"] = conversation_history
+        return {
+            "is_follow_up": True,
+            "needs_context": True,
+            "needs_clarification": False,
+            "resolved_target": {
+                "type": "job",
+                "name": "tencentNineImageMappingHandler",
+                "source": "history",
+                "confidence": 0.95,
+            },
+            "rewritten_question": (
+                "tencentNineImageMappingHandler "
+                "\u8be6\u7ec6\u8fc7\u7a0b\u662f\u4ec0\u4e48"
+            ),
+            "retrieval_intent": "execution_flow",
+            "preferred_tools": ["execution_trace"],
+            "reason": "follow-up",
+        }
+
+    def fake_plan_question_retrieval(
+        question: str,
+        available_tools: list[object],
+        source_available: bool,
+        memory_observations: list[str],
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        calls["planner_question"] = question
+        return (
+            {"task_goal": "trace", "intent": "execution_flow"},
+            {"task_goal": "trace", "steps": []},
+        )
+
+    monkeypatch.setattr(
+        nodes,
+        "resolve_contextual_query",
+        fake_resolve_contextual_query,
+    )
+    monkeypatch.setattr(
+        nodes.planner,
+        "plan_question_retrieval",
+        fake_plan_question_retrieval,
+    )
+    state: AgenticRagState = {
+        "question": "\u8be6\u7ec6\u8fc7\u7a0b\u662f\u4ec0\u4e48",
+        "conversation_history": [
+            {
+                "role": "assistant",
+                "content": (
+                    "\u901a\u8fc7 `tencentNineImageMappingHandler` "
+                    "\u8fd9\u4e2a Job \u5165\u5e93\u3002"
+                ),
+            }
+        ],
+        "tool_configs": [],
+        "source_available": True,
+        "observations": [],
+    }
+
+    state = nodes.resolve_query_context(state)
+    state = nodes.plan_retrieval(state)
+
+    assert calls["resolver_question"] == "\u8be6\u7ec6\u8fc7\u7a0b\u662f\u4ec0\u4e48"
+    assert calls["planner_question"] == (
+        "tencentNineImageMappingHandler "
+        "\u8be6\u7ec6\u8fc7\u7a0b\u662f\u4ec0\u4e48"
+    )
+    assert state["question_understanding"]["rewritten_query"] == (
+        "tencentNineImageMappingHandler "
+        "\u8be6\u7ec6\u8fc7\u7a0b\u662f\u4ec0\u4e48"
+    )
+
+
 def test_generate_final_answer_includes_task_planning_guidance(
     monkeypatch: object,
 ) -> None:

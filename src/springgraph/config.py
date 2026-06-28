@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     planner_llm_api_key: str = ""
     planner_llm_timeout_seconds: float | None = None
     planner_llm_temperature: float | None = None
+    query_resolver_llm_provider: str = ""
+    query_resolver_llm_model: str = ""
+    query_resolver_llm_base_url: str = ""
+    query_resolver_llm_api_key: str = ""
+    query_resolver_llm_timeout_seconds: float | None = None
+    query_resolver_llm_temperature: float | None = None
 
     model_config = SettingsConfigDict(
         env_prefix="SPRINGGRAPH_",

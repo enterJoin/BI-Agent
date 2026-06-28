@@ -39,6 +39,11 @@ def invoke_agent_model(prompt: str) -> str:
     return _invoke_model(prompt, _planner_config(), "planner")
 
 
+def invoke_query_resolver_model(prompt: str) -> str:
+    """Call the configured chat model for follow-up query resolution."""
+    return _invoke_model(prompt, _query_resolver_config(), "query resolver")
+
+
 def _invoke_model(prompt: str, config: _LlmConfig, purpose: str) -> str:
     """Call one configured chat model and return text content."""
     provider = config.provider.strip().lower()
@@ -97,6 +102,27 @@ def _planner_config() -> _LlmConfig:
             settings.planner_llm_temperature
             if settings.planner_llm_temperature is not None
             else settings.llm_temperature
+        ),
+    )
+
+
+def _query_resolver_config() -> _LlmConfig:
+    settings = get_settings()
+    planner_config = _planner_config()
+    return _LlmConfig(
+        provider=settings.query_resolver_llm_provider or planner_config.provider,
+        model=settings.query_resolver_llm_model or planner_config.model,
+        base_url=settings.query_resolver_llm_base_url or planner_config.base_url,
+        api_key=settings.query_resolver_llm_api_key or planner_config.api_key,
+        timeout_seconds=(
+            settings.query_resolver_llm_timeout_seconds
+            if settings.query_resolver_llm_timeout_seconds is not None
+            else planner_config.timeout_seconds
+        ),
+        temperature=(
+            settings.query_resolver_llm_temperature
+            if settings.query_resolver_llm_temperature is not None
+            else planner_config.temperature
         ),
     )
 
